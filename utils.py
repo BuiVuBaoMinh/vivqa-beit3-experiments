@@ -21,10 +21,11 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from torch import inf
+# from torch import inf
 from torchmetrics import Metric
 from tensorboardX import SummaryWriter
 
+inf = float('inf')
 
 def bool_flag(s):
     """

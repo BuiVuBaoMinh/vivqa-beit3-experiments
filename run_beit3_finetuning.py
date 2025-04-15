@@ -36,7 +36,7 @@ def get_args():
     parser.add_argument('--model', default='beit_base_patch16_224', type=str, metavar='MODEL',
                         help='Name of model to train')
     parser.add_argument('--task', type=str, required=True, 
-                        choices=['nlvr2', 'vqav2', 'flickr30k', 'coco_retrieval', 'coco_captioning', 'nocaps', 'imagenet'], 
+                        choices=['nlvr2', 'vqav2', 'flickr30k', 'coco_retrieval', 'coco_captioning', 'nocaps', 'imagenet', 'openvivqa'], 
                         help='Name of task to fine-tuning')
 
     parser.add_argument('--input_size', default=224, type=int,
@@ -250,6 +250,8 @@ def main(args, ds_init):
             model_config = "%s_captioning" % args.model
         elif args.task in ("imagenet"):
             model_config = "%s_imageclassification" % args.model
+        elif args.task in ("openvivqa"):
+            model_config = args.model
         else:
             model_config = "%s_%s" % (args.model, args.task)
     else:
@@ -372,6 +374,10 @@ def main(args, ds_init):
                 result_file = os.path.join(args.output_dir, f"{args.task}_result.json")
                 print(json.dumps(captioning_result))
                 utils.write_result_to_jsonl(captioning_result, result_file)
+            exit(0)
+        elif args.task == "openvivqa":
+            result, _ = evaluate(data_loader_test, model, device, task_handler)
+            utils.dump_predictions(args, result, "openvivqa_test")
             exit(0)
 
     print(f"Start training for {args.epochs} epochs")

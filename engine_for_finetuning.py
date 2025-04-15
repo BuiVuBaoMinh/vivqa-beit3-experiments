@@ -237,6 +237,49 @@ class VQAHandler(TaskHandler):
         else:
             return self.predictions, "prediction"
 
+class OpenViVQAHandler(TaskHandler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.predictions = []
+        self.criterion = nn.BCEWithLogitsLoss(reduction='mean')
+        self.label2ans = None
+
+    def train_batch(self, model, image, language_tokens, padding_mask, labels):
+        logits = model(
+            image=image, question=language_tokens, 
+            padding_mask=padding_mask)
+        return {
+            "loss": self.criterion(input=logits.float(), target=labels.float()) * labels.shape[1], 
+        }
+
+    def before_eval(self, metric_logger, data_loader, **kwargs):
+        self.predictions.clear()
+        self.metric_logger = metric_logger
+        self.label2ans = data_loader.dataset.label2ans
+
+    def eval_batch(self, model, image, language_tokens, padding_mask, labels=None, qid=None):
+        logits = model(
+            image=image, question=language_tokens, 
+            padding_mask=padding_mask)
+        batch_size = language_tokens.shape[0]
+        if labels is not None:
+            scores = utils.VQAScore()(logits, labels) * 100.0
+            self.metric_logger.meters['score'].update(scores.item(), n=batch_size)
+        else:
+            _, preds = logits.max(-1)
+            for image_id, pred in zip(qid, preds):
+                self.predictions.append({
+                    "question_id": image_id.item(), 
+                    "answer": self.label2ans[pred.item()], 
+                })
+
+    def after_eval(self, **kwargs):
+        if len(self.predictions) == 0:
+            print('* Score {score.global_avg:.3f}'.format(score=self.metric_logger.score))
+            return {k: meter.global_avg for k, meter in self.metric_logger.meters.items()}, "score"
+        else:
+            return self.predictions, "prediction"
+
 
 class CaptioningHandler(TaskHandler):
     def __init__(self, args) -> None:
@@ -441,6 +484,8 @@ def get_handler(args):
         return NLVR2Handler()
     elif args.task == "vqav2":
         return VQAHandler()
+    elif args.task == "openvivqa":
+        return OpenViVQAHandler()
     elif args.task in ("flickr30k", "coco_retrieval"):
         return RetrievalHandler()
     elif args.task in ("coco_captioning", "nocaps"):

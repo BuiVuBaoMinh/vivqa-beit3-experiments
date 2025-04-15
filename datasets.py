@@ -569,17 +569,45 @@ class OpenViVQADataset(BaseDataset):
     def __init__(self, data_path, **kwargs):
         super().__init__(data_path=data_path, **kwargs)
         ans2label_file = os.path.join(data_path, "answer2label.txt")
+        ans2label = {}
+        label2ans = []
+        with open(ans2label_file, mode="r", encoding="utf-8") as reader:
+            for i, line in enumerate(reader):
+                data = json.loads(line)
+                ans = data["answer"]
+                label = data["label"]
+                label = int(label)
+                assert label == i
+                ans2label[ans] = i
+                label2ans.append(ans)
+        
+        self.ans2label = ans2label
+        self.label2ans = label2ans
 
 
     @staticmethod
     def get_index_files(split, task=None):
-        if split == "test":
-            return ("openvivqa_test_v2.jsonl")
+        if split == "train":
+            return ("openvivqa.train.jsonl", "openvivqa.trainable_val.jsonl")
+        elif split == "val":
+            return ("openvivqa.rest_val.jsonl", )
+        elif split == "test":
+            return ("openvivqa.test.jsonl", )
+        elif split == "test-dev":
+            return ("openvivqa.test-dev.jsonl", )            
         else:
             raise RuntimeError("split %s is not found!" % split)
 
     def __getitem__(self, index: int):
-        raise RuntimeError("OpenViVQADataset: method not implemented")
+        data = super().__getitem__(index)
+        if "labels" in self.items[index] and len(self.items[index]["labels"]) > 0:
+            labels = [0.] * len(self.label2ans)
+            for l, s in zip(self.items[index]["labels"], self.items[index]["scores"]):
+                labels[l] = s
+            data["labels"] = torch.FloatTensor(labels)
+        else:
+            data["qid"] = self.items[index]["qid"]
+        return data
 
     @staticmethod
     def get_score(occurences):
@@ -710,7 +738,7 @@ class OpenViVQADataset(BaseDataset):
                         labels, scores = [], []
 
                     items.append({
-                        "image_path": os.path.join(split_name, path.split('/')[-1]), 
+                        "image_path": os.path.join(split_name, path.split('/')[-2], path.split('/')[-1]), 
                         "text_segment": q["token_ids"], 
                         "labels": labels, 
                         "scores": scores, 
@@ -891,6 +919,7 @@ task2dataset = {
     "coco_captioning": CaptioningDataset,
     "nocaps": CaptioningDataset,
     "imagenet": ImageNetDataset,
+    "openvivqa": OpenViVQADataset,
 }
 
 
