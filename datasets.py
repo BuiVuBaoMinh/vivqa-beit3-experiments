@@ -118,7 +118,7 @@ class BaseDataset(torch.utils.data.Dataset):
 def _write_data_into_jsonl(items, jsonl_file):
     with open(jsonl_file, mode="w", encoding="utf-8") as writer:
         for data in items:
-            writer.write(json.dumps(data, indent=None))
+            writer.write(json.dumps(data, indent=None, ensure_ascii=False))
             writer.write('\n')
     print("Write %s with %d items !" % (jsonl_file, len(items)))
 
