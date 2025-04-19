@@ -280,7 +280,6 @@ class OpenViVQAHandler(TaskHandler):
         else:
             return self.predictions, "prediction"
 
-
 class CaptioningHandler(TaskHandler):
     def __init__(self, args) -> None:
         super().__init__()
