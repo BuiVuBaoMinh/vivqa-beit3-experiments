@@ -1,12 +1,15 @@
-from datasets import OpenViVQADataset
+from datasets import OpenViVQADataset, ViVQAv2Dataset
 from transformers import XLMRobertaTokenizer
 
-tokenizer = XLMRobertaTokenizer("/home/lenovo/exp1/beit3-model-n-ckpts/beit3-model/beit3.spm")
+tokenizer = XLMRobertaTokenizer("text-tokenizers/beit3.spm")
+# tokenizer = XLMRobertaTokenizer("/home/lenovo/exp1/beit3-model-n-ckpts/beit3-model/beit3.spm") # for gcp vm
 
-data_path = "/home/lenovo/exp1/data/openvivqa"
-annotation_data_path = "/home/lenovo/exp1/data/openvivqa/vqa"
+VIVIQA_DATASET_PATH = "data/vivqa"
 
-OpenViVQADataset.make_dataset_index(
+data_path = VIVIQA_DATASET_PATH
+annotation_data_path = VIVIQA_DATASET_PATH + "/vqa"
+
+ViVQAv2Dataset.make_dataset_index(
     data_path=data_path,
     tokenizer=tokenizer,
     annotation_data_path=annotation_data_path,

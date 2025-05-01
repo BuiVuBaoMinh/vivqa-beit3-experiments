@@ -22,6 +22,7 @@ from glossary import normalize_word
 from randaug import RandomAugment
 
 from deep_translator import GoogleTranslator
+import sys
 
 
 class BaseDataset(torch.utils.data.Dataset):
@@ -632,8 +633,8 @@ class ViVQAv2Dataset(BaseDataset):
                 tokens = tokenizer.tokenize(question_text)
                 token_ids = tokenizer.convert_tokens_to_ids(tokens)
 
-                assert q["question_id"] not in _annot[q["image_id"]]
-                _annot[q["image_id"]][q["question_id"]] = {
+                assert q["id"] not in _annot[q["image"]]
+                _annot[q["image"]][q["id"]] = {
                     "question": question_text, 
                     "token_ids": token_ids, 
                 }
@@ -643,19 +644,19 @@ class ViVQAv2Dataset(BaseDataset):
         all_major_answers = list()
 
         for split, annots in zip(
-            ["train", "val"], [train_vivqa, test_vivqa],
+            ["train", "val"], [train_vivqa, val_vivqa],
         ):
             # _annot = annotations[split]
             for q in annots:
                 all_major_answers.append(q["answer"])
 
         all_major_answers = [normalize_word(word) for word in all_major_answers]
-        counter = {k: v for k, v in Counter(all_major_answers).items() if v >= 9}
+        counter = {k: v for k, v in Counter(all_major_answers).items() if v >= 0}
         ans2label = {k: i for i, k in enumerate(counter.keys())}
         label2ans = list(counter.keys())
 
         for split, annots in zip(
-            ["train", "val"], [train_vivqa, test_vivqa],
+            ["train", "val"], [train_vivqa, val_vivqa],
         ):
             _annot = annotations[split]
             for q in annots:
@@ -685,7 +686,7 @@ class ViVQAv2Dataset(BaseDataset):
             annotations[split] = filtered_annot
 
         split2items = {}
-        for split in ["train", "val", "test", "test-dev"]:
+        for split in ["train", "val", "test"]:
             annot = annotations[split]
             split_name = {
                 "train": "train",
