@@ -21,7 +21,7 @@ import utils
 from glossary import normalize_word
 from randaug import RandomAugment
 
-from deep_translator import GoogleTranslator
+# from deep_translator import GoogleTranslator
 import sys
 
 
@@ -566,7 +566,7 @@ class VQAv2Dataset(BaseDataset):
                 }
                 writer.write("%s\n" % json.dumps(to_json))
 
-class ViVQAv2Dataset(BaseDataset):
+class ViVQADataset(BaseDataset):
     def __init__(self, data_path, **kwargs):
         super().__init__(data_path=data_path, **kwargs)
         ans2label_file = os.path.join(data_path, "answer2label.txt")
@@ -590,7 +590,7 @@ class ViVQAv2Dataset(BaseDataset):
         if split == "train":
             return ("vivqa.train.jsonl", "vivqa.trainable_val.jsonl")
         elif split == "val":
-            return ("vivqa.rest_val.jsonl", )
+            return ("vivqa.trainable_val.jsonl", )
         elif split == "test":
             return ("vivqa.test.jsonl", )           
         else:
@@ -717,7 +717,7 @@ class ViVQAv2Dataset(BaseDataset):
                         labels, scores = [], []
 
                     items.append({
-                        "image_path": os.path.join(split_name, path.split('/')[-1]), 
+                        "image_path": os.path.join("images", split_name, path.split('/')[-1]), 
                         "text_segment": q["token_ids"], 
                         "labels": labels, 
                         "scores": scores, 
@@ -744,8 +744,8 @@ class ViVQAv2Dataset(BaseDataset):
             else:
                 trainable_val += val_image2items[image_id]
         
-        _write_data_into_jsonl(items=trainable_val, jsonl_file=os.path.join(data_path, "vqa.trainable_val.jsonl"))
-        _write_data_into_jsonl(items=rest_val, jsonl_file=os.path.join(data_path, "vqa.rest_val.jsonl"))
+        _write_data_into_jsonl(items=trainable_val, jsonl_file=os.path.join(data_path, "vivqa.trainable_val.jsonl"))
+        _write_data_into_jsonl(items=rest_val, jsonl_file=os.path.join(data_path, "vivqa.rest_val.jsonl"))
 
         with open(os.path.join(data_path, "answer2label.txt"), mode="w", encoding="utf-8") as writer:
             for ans in ans2label:
@@ -1110,6 +1110,7 @@ task2dataset = {
     "nocaps": CaptioningDataset,
     "imagenet": ImageNetDataset,
     "openvivqa": OpenViVQADataset,
+    "vivqa": ViVQADataset,
 }
 
 

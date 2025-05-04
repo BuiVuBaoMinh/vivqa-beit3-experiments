@@ -8,15 +8,15 @@ import sys
 
 nltk.download('wordnet') # run this once
 
-with open("/home/lenovo/exp1/data/openvivqa/vqa/openvivqa_test_v2.json", "r", encoding="utf-8") as f:
+with open("/home/lenovo/exp1/data/vivqa/vqa/test.json", "r", encoding="utf-8") as f:
     data = json.load(f)
 
 # print(data[0])
 
-gt_dict = {item["id"]: item["answers"][0] for item in data["annotations"]}
+gt_dict = {item["id"]: item["answer"] for item in data["annotations"]}
 
 
-with open("/home/lenovo/exp1/output-dir/submit_openvivqa_test.json", "r", encoding="utf-8") as f:
+with open("/home/lenovo/exp1/output-dir/submit_vivqa_test.json", "r", encoding="utf-8") as f:
     predictions = json.load(f)
 
 # print(predictions[0])
@@ -49,6 +49,12 @@ for qid, pred in pred_dict.items():
         bleu = sentence_bleu([gt_tokens], pred_tokens, smoothing_function=smoothie)
         meteor = meteor_score([gt_tokens], pred_tokens)
         exact = int(gt.strip().lower() == pred.strip().lower())
+        # save pairs that are not exact match as json
+        if exact == 0:
+            with open("wrong_pairs.json", "a") as f:
+                json.dump({"qid": qid, "gt": gt, "pred": pred}, f)
+                f.write("\n")
+
 
         bleu_scores.append(bleu)
         meteor_scores.append(meteor)

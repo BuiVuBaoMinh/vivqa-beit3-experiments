@@ -36,7 +36,7 @@ def get_args():
     parser.add_argument('--model', default='beit_base_patch16_224', type=str, metavar='MODEL',
                         help='Name of model to train')
     parser.add_argument('--task', type=str, required=True, 
-                        choices=['nlvr2', 'vqav2', 'flickr30k', 'coco_retrieval', 'coco_captioning', 'nocaps', 'imagenet', 'openvivqa'], 
+                        choices=['nlvr2', 'vqav2', 'flickr30k', 'coco_retrieval', 'coco_captioning', 'nocaps', 'imagenet', 'openvivqa', 'vivqa'], 
                         help='Name of task to fine-tuning')
 
     parser.add_argument('--input_size', default=224, type=int,
@@ -378,6 +378,10 @@ def main(args, ds_init):
         elif args.task == "openvivqa":
             result, _ = evaluate(data_loader_test, model, device, task_handler)
             utils.dump_predictions(args, result, "openvivqa_test")
+            exit(0)
+        elif args.task == "vivqa":
+            result, _ = evaluate(data_loader_test, model, device, task_handler)
+            utils.dump_predictions(args, result, "vivqa_test")
             exit(0)
 
     print(f"Start training for {args.epochs} epochs")

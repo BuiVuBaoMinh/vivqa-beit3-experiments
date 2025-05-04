@@ -485,6 +485,8 @@ def get_handler(args):
         return VQAHandler()
     elif args.task == "openvivqa":
         return OpenViVQAHandler()
+    elif args.task == "vivqa":
+        return VQAHandler()
     elif args.task in ("flickr30k", "coco_retrieval"):
         return RetrievalHandler()
     elif args.task in ("coco_captioning", "nocaps"):
