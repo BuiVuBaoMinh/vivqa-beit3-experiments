@@ -384,71 +384,73 @@ def main(args, ds_init):
             utils.dump_predictions(args, result, "vivqa_test")
             exit(0)
 
-    print(f"Start training for {args.epochs} epochs")
-    start_time = time.time()
+    print(model)
 
-    max_accuracy = 0.0
-    for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
-            data_loader_train.sampler.set_epoch(epoch)
-        if log_writer is not None:
-            log_writer.set_step(epoch * num_training_steps_per_epoch * args.update_freq)
-        train_stats = train_one_epoch(
-            model, data_loader_train, optimizer, device, task_handler, epoch, 
-            epoch * num_training_steps_per_epoch, lr_schedule_values, loss_scaler, 
-            args.clip_grad, args.update_freq, model_ema, log_writer, args.task, mixup_fn,
-        )
-        if args.output_dir and args.save_ckpt:
-            if (epoch + 1) % args.save_ckpt_freq == 0 or epoch + 1 == args.epochs:
-                utils.save_model(
-                    args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
-                    loss_scaler=loss_scaler, epoch=epoch, model_ema=model_ema)
-        if data_loader_val is not None:
-            if args.task not in ["coco_captioning", "nocaps"]:
-                test_stats, task_key = evaluate(data_loader_val, model, device, task_handler)
-            else:
-                predictions, _ = evaluate(data_loader_val, model, device, task_handler)
-                prediction_file = utils.dump_predictions(args, predictions, f"{args.task}_val_e{epoch}")
-                result_file = os.path.join(args.output_dir, f"{args.task}_result_val_e{epoch}.json")
-                task_key = "CIDEr"
-                if utils.is_main_process():
-                    test_stats = utils.coco_caption_eval(args.output_dir, prediction_file, "{}_val".format(args.task))
-                    utils.write_result_to_jsonl(test_stats, result_file)
-                torch.distributed.barrier()
-                if not utils.is_main_process():
-                    test_stats = utils.read_result_from_jsonl(result_file)
+    # print(f"Start training for {args.epochs} epochs")
+    # start_time = time.time()
 
-            print(f"Performance of the network on the {len(data_loader_val.dataset)} val images: {test_stats[task_key]:.1f}%")
-            if max_accuracy < test_stats[task_key]:
-                max_accuracy = test_stats[task_key]
-                if args.output_dir and args.save_ckpt:
-                    utils.save_model(
-                        args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
-                        loss_scaler=loss_scaler, epoch="best", model_ema=model_ema)
+    # max_accuracy = 0.0
+    # for epoch in range(args.start_epoch, args.epochs):
+    #     if args.distributed:
+    #         data_loader_train.sampler.set_epoch(epoch)
+    #     if log_writer is not None:
+    #         log_writer.set_step(epoch * num_training_steps_per_epoch * args.update_freq)
+    #     train_stats = train_one_epoch(
+    #         model, data_loader_train, optimizer, device, task_handler, epoch, 
+    #         epoch * num_training_steps_per_epoch, lr_schedule_values, loss_scaler, 
+    #         args.clip_grad, args.update_freq, model_ema, log_writer, args.task, mixup_fn,
+    #     )
+    #     if args.output_dir and args.save_ckpt:
+    #         if (epoch + 1) % args.save_ckpt_freq == 0 or epoch + 1 == args.epochs:
+    #             utils.save_model(
+    #                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
+    #                 loss_scaler=loss_scaler, epoch=epoch, model_ema=model_ema)
+    #     if data_loader_val is not None:
+    #         if args.task not in ["coco_captioning", "nocaps"]:
+    #             test_stats, task_key = evaluate(data_loader_val, model, device, task_handler)
+    #         else:
+    #             predictions, _ = evaluate(data_loader_val, model, device, task_handler)
+    #             prediction_file = utils.dump_predictions(args, predictions, f"{args.task}_val_e{epoch}")
+    #             result_file = os.path.join(args.output_dir, f"{args.task}_result_val_e{epoch}.json")
+    #             task_key = "CIDEr"
+    #             if utils.is_main_process():
+    #                 test_stats = utils.coco_caption_eval(args.output_dir, prediction_file, "{}_val".format(args.task))
+    #                 utils.write_result_to_jsonl(test_stats, result_file)
+    #             torch.distributed.barrier()
+    #             if not utils.is_main_process():
+    #                 test_stats = utils.read_result_from_jsonl(result_file)
 
-            print(f'Max performance: {max_accuracy:.2f}%')
-            if log_writer is not None:
-                log_writer.update(acc=test_stats[task_key], head="perf", step=epoch)
+    #         print(f"Performance of the network on the {len(data_loader_val.dataset)} val images: {test_stats[task_key]:.1f}%")
+    #         if max_accuracy < test_stats[task_key]:
+    #             max_accuracy = test_stats[task_key]
+    #             if args.output_dir and args.save_ckpt:
+    #                 utils.save_model(
+    #                     args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
+    #                     loss_scaler=loss_scaler, epoch="best", model_ema=model_ema)
+
+    #         print(f'Max performance: {max_accuracy:.2f}%')
+    #         if log_writer is not None:
+    #             log_writer.update(acc=test_stats[task_key], head="perf", step=epoch)
             
-            log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                        **{f'val_{k}': v for k, v in test_stats.items()},
-                        'epoch': epoch,
-                        'n_parameters': n_parameters}
-        else:
-            log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                         # **{f'test_{k}': v for k, v in test_stats.items()},
-                         'epoch': epoch,
-                         'n_parameters': n_parameters}
+    #         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
+    #                     **{f'val_{k}': v for k, v in test_stats.items()},
+    #                     'epoch': epoch,
+    #                     'n_parameters': n_parameters}
+    #     else:
+    #         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
+    #                      # **{f'test_{k}': v for k, v in test_stats.items()},
+    #                      'epoch': epoch,
+    #                      'n_parameters': n_parameters}
 
-        if args.output_dir and utils.is_main_process():
-            if log_writer is not None:
-                log_writer.flush()
-            with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
-                f.write(json.dumps(log_stats) + "\n")
+    #     if args.output_dir and utils.is_main_process():
+    #         if log_writer is not None:
+    #             log_writer.flush()
+    #         with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
+    #             f.write(json.dumps(log_stats) + "\n")
 
-    total_time = time.time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print('Training time {}'.format(total_time_str))
+    # total_time = time.time() - start_time
+    # total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+    # print('Training time {}'.format(total_time_str))
 
 
 if __name__ == '__main__':
