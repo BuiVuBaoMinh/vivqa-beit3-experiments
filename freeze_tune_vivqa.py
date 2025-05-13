@@ -37,10 +37,6 @@ model =     model = create_model(
         checkpoint_activations=checkpoint_activations,
     )
 
-# Freeze all existing parameters
-for param in model.parameters():
-    param.requires_grad = False
-
 phobert_tokenizer = AutoTokenizer.from_pretrained("vinai/phobert-base-v2", use_fast=False)
 phobert_model = AutoModel.from_pretrained("vinai/phobert-base-v2")
 
@@ -52,3 +48,22 @@ model.beit3.text_embed = phobert_model.embeddings.word_embeddings
 # Print the class of phobert tokenizer
 print("Phobert tokenizer class: ", type(phobert_tokenizer))
 print("Beit3 tokenizer class: ", type(model.beit3.text_embed))
+
+# Example: freeze all except text embed and text (B) experts
+for name, param in model.named_parameters():
+    # Freeze vision-embedding and A-expert parameters (do not train)
+    if name.startswith("beit3.vision_embed") or ".A." in name:
+        param.requires_grad = False
+    # Allow training of text embedding and B-expert parameters
+    elif name.startswith("beit3.text_embed") or ".B." in name:
+        param.requires_grad = True
+    else:
+        # For any other parameters (e.g. classification head), you may freeze or unfreeze as needed
+        param.requires_grad = False
+
+# Check the frozen parameters
+for name, param in model.named_parameters():
+    if not param.requires_grad:
+        print(f"Frozen parameter: {name}")
+    else:
+        print(f"Trainable parameter: {name}")
