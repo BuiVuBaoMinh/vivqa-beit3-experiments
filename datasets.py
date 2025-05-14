@@ -1361,10 +1361,14 @@ def get_sentencepiece_model_for_beit3(args):
     return XLMRobertaTokenizer(args.sentencepiece_model)
 
 
-def create_dataset_by_split(args, split, is_train=True):
+def create_dataset_by_split(args, split, is_train=True, phobert_tokenizer=None):
     transform = build_transform(is_train=is_train, args=args)
     dataset_class = task2dataset[args.task]
-    tokenizer = get_sentencepiece_model_for_beit3(args)
+
+    if args.task == 'vivqa':
+        tokenizer = phobert_tokenizer
+    else:
+        tokenizer = get_sentencepiece_model_for_beit3(args)
 
     opt_kwargs = {}
     if args.task in ["coco_captioning", "nocaps"]:
@@ -1389,10 +1393,10 @@ def create_dataset_by_split(args, split, is_train=True):
     )
 
 
-def create_downstream_dataset(args, is_eval=False):
+def create_downstream_dataset(args, is_eval=False, phobert_tokenizer=None):
     if is_eval:
-        return create_dataset_by_split(args, split="test", is_train=False)
+        return create_dataset_by_split(args, split="test", is_train=False, phobert_tokenizer=phobert_tokenizer)
     else:
         return \
-            create_dataset_by_split(args, split="train", is_train=True), \
-            create_dataset_by_split(args, split="val", is_train=True)
+            create_dataset_by_split(args, split="train", is_train=True, phobert_tokenizer=phobert_tokenizer), \
+            create_dataset_by_split(args, split="val", is_train=True, phobert_tokenizer=phobert_tokenizer)

@@ -19,5 +19,3 @@ ViVQADataset.make_dataset_index(
     tokenizer=tokenizer,
     annotation_data_path=annotation_data_path,
 )
-
-tokenizer.conv

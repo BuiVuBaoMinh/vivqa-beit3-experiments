@@ -326,6 +326,13 @@ def beit3_base_patch16_480_vivqa(pretrained=False, **kwargs):
     model = BEiT3ForVisualQuestionAnswering(args, num_classes=308, **kwargs) # vivqa dict has 308 classes
     return model
 
+@register_model
+def beit3_base_patch16_480_vivqa_phobert(pretrained=False, **kwargs):
+    args = _get_base_config(img_size=480, **kwargs)
+    args.normalize_output = False
+    model = BEiT3ForVisualQuestionAnswering(args, num_classes=335, **kwargs) # vivqa phobert-segmented dict has 335 classes
+    return model
+
 
 @register_model
 def beit3_large_patch16_384_vqav2(pretrained=False, **kwargs):
