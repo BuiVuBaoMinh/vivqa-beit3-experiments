@@ -274,17 +274,23 @@ def main(args, ds_init):
         checkpoint_activations=args.checkpoint_activations,
     )
 
-    if args.task == 'vivqa':
-        # Replace tokenizer
-        print("Replacing original tokenizer w/ PhoBERT's...\n")
-        print("Phobert token size: ", phobert_model.embeddings.word_embeddings)
-        print("Beit3 token size: ", model.beit3.text_embed)
+    if args.finetune:
+        utils.load_model_and_may_interpolate(args.finetune, model, args.model_key, args.model_prefix)
 
-        model.beit3.text_embed = phobert_model.embeddings.word_embeddings
+    if args.task == 'vivqa':
+
+        # new_layer = phobert_model.embeddings.word_embeddings
+        new_layer = phobert_model.embeddings
+        # Replace tokenizer
+        print("Replacing original beit3 text_embed w/ PhoBERT's...\n")
+        print("Phobert embedding: ", new_layer)
+        print("Beit3 embedding: ", model.beit3.text_embed)
+
+        model.beit3.text_embed = new_layer
 
         # Print the class of phobert tokenizer
-        print("Phobert tokenizer class: ", type(phobert_model.embeddings.word_embeddings))
-        print("Beit3 tokenizer class: ", type(model.beit3.text_embed))
+        print("Phobert embedding class: ", type(new_layer))
+        print("Beit3 embedding class: ", type(new_layer))
 
         # Freeze all except text embed and text (B) experts
         for name, param in model.named_parameters():
@@ -298,24 +304,33 @@ def main(args, ds_init):
                 # For any other parameters (e.g. classification head)
                 param.requires_grad = False
 
-        total_params_cnt = 0
-        frozen_params_cnt = 0
-        # Check the frozen parameters
-        for name, param in model.named_parameters():
-            total_params_cnt += 1
-            if not param.requires_grad:
-                print(f"Frozen parameter: {name}")
-                frozen_params_cnt += 1
-            else:
-                print(f"Trainable parameter: {name}")
-        print(f"Replaced sentence_piece_tokenizer w/ PhoBERT's. Checking trainable params.\n")
-        print(f"Total params: {sum(p.numel() for p in model.parameters())}")
-        print(f"Frozen params: {sum(p.numel() for p in model.parameters() if not p.requires_grad)}")
-        n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"Trainable params: {n_parameters}")
+        # for name, param in model.named_parameters():
+        #     if name.startswith("beit3.vision_embed"):
+        #         param.requires_grad = False
 
-    if args.finetune:
-        utils.load_model_and_may_interpolate(args.finetune, model, args.model_key, args.model_prefix)
+        # Check the frozen parameters
+        with open(args.output_dir + "/Model_Architecture.txt", "w") as f:
+            for name, param in model.named_parameters():
+                if not param.requires_grad:
+                    print(f"Frozen parameter block: {name}")
+                    f.write(f"Frozen parameter block: {name}\n")
+                else:
+                    print(f"Trainable parameter block: {name}")
+                    f.write(f"Trainable parameter block: {name}\n")
+
+        with open(args.output_dir + "/Paramaters.txt", "w") as f:
+            print(f"Replaced beit3 text_embed w/ PhoBERT's. Checking trainable params.\n")
+            total_params = sum(p.numel() for p in model.parameters())
+            frozen_params = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+            n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+            print(f"Total params: {total_params}")
+            print(f"Frozen params: {frozen_params}")
+            print(f"Trainable params: {n_parameters}")
+
+            f.write(f"Total params: {total_params}")
+            f.write(f"Frozen params: {frozen_params}")
+            f.write(f"Trainable params: {n_parameters}")
 
     model.to(device)
 

@@ -43,7 +43,7 @@ phobert_model = AutoModel.from_pretrained("vinai/phobert-base-v2")
 print("Phobert token size: ", phobert_model.embeddings.word_embeddings)
 print("Beit3 token size: ", model.beit3.text_embed)
 
-model.beit3.text_embed = phobert_model.embeddings.word_embeddings
+# model.beit3.text_embed = phobert_model.embeddings
 
 # Print the class of phobert tokenizer
 print("Phobert tokenizer class: ", type(phobert_tokenizer))

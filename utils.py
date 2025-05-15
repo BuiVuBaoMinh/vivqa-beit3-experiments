@@ -874,7 +874,7 @@ def dump_predictions(args, result, file_suffix):
     result_file = os.path.join(args.output_dir, f"submit_{file_suffix}.json")
     if jsons is not None:
         with open(result_file, "w") as fp:
-            json.dump(jsons, fp, indent=2)
+            json.dump(jsons, fp, indent=2, ensure_ascii=False)
         print("Infer %d examples into %s" % (len(jsons), result_file))
     return result_file
 
