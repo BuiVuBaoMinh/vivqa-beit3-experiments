@@ -8,7 +8,7 @@ import sys
 
 nltk.download('wordnet') # run this once
 
-with open("/root/projects/exp1/data/vivqa/annotations/test.json", "r", encoding="utf-8") as f:
+with open("/home/lenovo/exp1/data/vivqa/annotations/original/test.json", "r", encoding="utf-8") as f:
     data = json.load(f)
 
 # print(data[0])
@@ -16,7 +16,7 @@ with open("/root/projects/exp1/data/vivqa/annotations/test.json", "r", encoding=
 gt_dict = {item["id"]: item["answer"] for item in data}
 
 
-with open("/root/projects/exp1/submit_vivqa_test_translated.json", "r", encoding="utf-8") as f:
+with open("/home/lenovo/exp1/output-dir/submit_vivqa_test.json", "r", encoding="utf-8") as f:
     predictions = json.load(f)
 
 # print(predictions[0])

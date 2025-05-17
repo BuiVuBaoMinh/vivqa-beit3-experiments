@@ -300,8 +300,9 @@ def main(args, ds_init):
             # Allow training of text embedding and B-expert parameters
             elif name.startswith("beit3.text_embed") or ".B." in name:
                 param.requires_grad = True
+            elif name.startswith("pooler") or name.startswith("head"):
+                param.requires_grad = True
             else:
-                # For any other parameters (e.g. classification head)
                 param.requires_grad = False
 
         # for name, param in model.named_parameters():
