@@ -200,6 +200,10 @@ def get_args():
     parser.add_argument('--zero_stage', default=0, type=int,
                         help='ZeRO optimizer stage (default: 0)')
 
+    # For Phobert Vivqa experiments
+    parser.add_argument('--phobert', action='store_true', default=False,
+                        help="Specify whether replacing the phobert's tokenizer and embedding layers or not")
+
     known_args, _ = parser.parse_known_args()
 
     if known_args.enable_deepspeed:
@@ -246,7 +250,7 @@ def main(args, ds_init):
 
     phobert_model = None
     phobert_tokenizer = None
-    if args.task == 'vivqa':
+    if args.task == 'vivqa' and args.phobert:
         phobert_tokenizer = AutoTokenizer.from_pretrained("vinai/phobert-base-v2") # using PhoBERT tokenizer
         phobert_model = AutoModel.from_pretrained("vinai/phobert-base-v2") # Get word_embedding from phobert to replace text_embed
 
@@ -277,7 +281,7 @@ def main(args, ds_init):
     if args.finetune:
         utils.load_model_and_may_interpolate(args.finetune, model, args.model_key, args.model_prefix)
 
-    if args.task == 'vivqa':
+    if args.task == 'vivqa' and args.phobert:
 
         # new_layer = phobert_model.embeddings.word_embeddings
         new_layer = phobert_model.embeddings
@@ -309,29 +313,29 @@ def main(args, ds_init):
         #     if name.startswith("beit3.vision_embed"):
         #         param.requires_grad = False
 
-        # Check the frozen parameters
-        with open(args.output_dir + "/Model_Architecture.txt", "w") as f:
-            for name, param in model.named_parameters():
-                if not param.requires_grad:
-                    print(f"Frozen parameter block: {name}")
-                    f.write(f"Frozen parameter block: {name}\n")
-                else:
-                    print(f"Trainable parameter block: {name}")
-                    f.write(f"Trainable parameter block: {name}\n")
+    # Check the frozen parameters
+    with open(args.output_dir + "/Model_Architecture.txt", "w") as f:
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                print(f"Frozen parameter block: {name}")
+                f.write(f"Frozen parameter block: {name}\n")
+            else:
+                print(f"Trainable parameter block: {name}")
+                f.write(f"Trainable parameter block: {name}\n")
 
-        with open(args.output_dir + "/Paramaters.txt", "w") as f:
-            print(f"Replaced beit3 text_embed w/ PhoBERT's. Checking trainable params.\n")
-            total_params = sum(p.numel() for p in model.parameters())
-            frozen_params = sum(p.numel() for p in model.parameters() if not p.requires_grad)
-            n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    with open(args.output_dir + "/Paramaters.txt", "w") as f:
+        print(f"Replaced beit3 text_embed w/ PhoBERT's. Checking trainable params.\n")
+        total_params = sum(p.numel() for p in model.parameters())
+        frozen_params = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+        n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-            print(f"Total params: {total_params}")
-            print(f"Frozen params: {frozen_params}")
-            print(f"Trainable params: {n_parameters}")
+        print(f"Total params: {total_params}\n")
+        print(f"Frozen params: {frozen_params}\n")
+        print(f"Trainable params: {n_parameters}\n")
 
-            f.write(f"Total params: {total_params}")
-            f.write(f"Frozen params: {frozen_params}")
-            f.write(f"Trainable params: {n_parameters}")
+        f.write(f"Total params: {total_params}\n")
+        f.write(f"Frozen params: {frozen_params}\n")
+        f.write(f"Trainable params: {n_parameters}\n")
 
     model.to(device)
 
