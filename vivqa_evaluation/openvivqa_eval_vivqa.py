@@ -22,6 +22,7 @@ class F1:
                 # if either the prediction or the truth is no-answer then f1 = 1 if they agree, 0 otherwise
                 if len(r) == 0 or len(gt) == 0:
                     scores_per_res.append(int(r == gt))
+                    print("F1 no answer")
                 else:
                     common_tokens = set(r) & set(gt)
                     # if there are no common tokens then f1 = 0
@@ -115,6 +116,35 @@ class Recall:
     def __str__(self) -> str:
         return "Recall"
 
+class ExactMatch:
+    def compute_score(self, gts, res):
+        """
+        Compute the Exact Match (EM) score between raw string answers.
+        :param  gts (dict) : dictionary with key <image> and value <list of raw string reference answers>
+                res (dict) : dictionary with key <image> and value <list containing raw string predicted answer>
+        :return: em (float) : computed Exact Match score for the corpus
+        """
+        scores = []
+        for key in res:
+            pred = res[key][0]
+            match_scores = [int(pred == gt) for gt in gts[key]]
+            if pred==gts[key][0]:
+                print(f"Wrong pairs id: {key}")
+                print(f"pred: {pred}")
+                print(f"gt: {gts[key][0]}\n")
+            scores.append(np.mean(match_scores))  # average across references
+
+        scores = np.array(scores)
+        return scores.mean(), scores
+
+    def __str__(self) -> str:
+        return "ExactMatch"
+
+def segment_normalize(text):
+    normalized_text = text.lower()
+    normalized_text = normalized_text.replace("_", " ")
+    return normalized_text
+
 def get_args():
     parser = argparse.ArgumentParser('OpenViVQA eval P, R, F1 for vivqa.', add_help=False)
 
@@ -144,19 +174,28 @@ def main(args):
     with open(res_file, "r", encoding="utf-8") as rsf:
         res_data = json.load(rsf)
 
-    # Convert to dicts with id as keys
-    if args.phobert:
-        py_vncorenlp.download_model(save_dir='/root/projects/exp1/vncorenlp')
-        rdrsegmenter = py_vncorenlp.VnCoreNLP(annotators=["wseg"], save_dir='/root/projects/exp1/vncorenlp')
-        # TODO: finish this
 
     gts = {}
-    for item in gt_data:
-        gts[item["id"]] = tokenizer.tokenize(item["answer"].lower())
-
     res = {}
-    for item in res_data:
-        res[item["question_id"]] = tokenizer.tokenize(item["answer"].lower())
+    if args.phobert:
+        for item in gt_data:
+            gts[item["id"]] = tokenizer.tokenize(item["answer"].lower())
+
+        rdrsegmenter = py_vncorenlp.VnCoreNLP(annotators=["wseg"], save_dir='/root/projects/exp1/vncorenlp')
+
+        # for item in gt_data:
+        #     segmented_ans = rdrsegmenter.word_segment(item["answer"])
+        #     gts[item["id"]] = tokenizer.tokenize(segmented_ans[0])
+        
+        for item in res_data:
+            segmented_ans = rdrsegmenter.word_segment(item["answer"])
+            res[item["question_id"]] = tokenizer.tokenize(segmented_ans[0])
+    else:
+        for item in gt_data:
+            gts[item["id"]] = tokenizer.tokenize(item["answer"].lower())
+
+        for item in res_data:
+            res[item["question_id"]] = tokenizer.tokenize(item["answer"].lower())
 
     scorer = Precision()
     score, details = scorer.compute_score(gts, res)
@@ -170,7 +209,33 @@ def main(args):
     score, details = scorer.compute_score(gts, res)
     print(f"Token-based F1 Score (F1): {score:.4f}")
 
+    # Raw string ground truth and result (for Exact Match)
+    gts_raw = {}
+    for item in gt_data:
+        gts_raw[item["id"]] = [segment_normalize(item["answer"])]
+
+    res_raw = {}
+    for item in res_data:
+        res_raw[item["question_id"]] = [segment_normalize(item["answer"])]
+
+    # Compute exact match
+    scorer = ExactMatch()
+    score, details_em = scorer.compute_score(gts_raw, res_raw)
+    print(f"Exact Match Score (EM): {score:.4f}")
+
 
 if __name__ == "__main__":
+    """
+    Examples:
+    python openvivqa_eval_vivqa.py \
+    --gt_file /root/projects/exp1/data/vivqa/vqa/test_en.json \
+    --res_file /root/projects/exp1/vivqa_scoring/en/submit_vivqa_test_en_sorted.json
+    
+
+    python openvivqa_eval_vivqa.py \
+    --phobert \
+    --gt_file /root/projects/exp1/data/vivqa/vqa/test_vi.json \
+    --res_file /root/projects/exp1/vivqa_scoring/vi/submit_vivqa_test_vi_sorted.json
+    """
     opts = get_args()
     main(opts)
