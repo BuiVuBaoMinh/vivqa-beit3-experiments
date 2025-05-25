@@ -608,7 +608,7 @@ class ViVQADataset(BaseDataset):
         return data
 
     @classmethod
-    def make_dataset_index(cls, data_path, tokenizer_spm, tokenizer_phobert, annotation_data_path):
+    def make_dataset_index(cls, data_path, tokenizer_spm, tokenizer_phobert, annotation_data_path, predefined_dict_path=None):
 
         with open(os.path.join(annotation_data_path, "train_vi.json"), "r") as fp:
             train_vivqa_vi = json.load(fp)
@@ -669,18 +669,36 @@ class ViVQADataset(BaseDataset):
             annotations_en[split] = _annot
 
         all_major_answers = list()
+        
+        if not predefined_dict_path:
+            for split, annots in zip(
+                ["train", "val"], [train_vivqa_vi, val_vivqa_vi],
+            ):
+                # _annot = annotations[split]
+                for q in annots:
+                    all_major_answers.append(q["answer"])
 
-        for split, annots in zip(
-            ["train", "val"], [train_vivqa_vi, val_vivqa_vi],
-        ):
-            # _annot = annotations[split]
-            for q in annots:
-                all_major_answers.append(q["answer"])
+            all_major_answers = [segment_normalize(word) for word in all_major_answers]
+            counter = {k: v for k, v in Counter(all_major_answers).items() if v >= 0}
+            ans2label = {k: i for i, k in enumerate(counter.keys())}
+            label2ans = list(counter.keys())
+        else:
+            ans2label = {}
+            label2ans = []
+            with open(predefined_dict_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    item = json.loads(line)
+                    ans = item["answer"]
+                    label = item["label"]
+                    ans2label[ans] = label
 
-        all_major_answers = [segment_normalize(word) for word in all_major_answers]
-        counter = {k: v for k, v in Counter(all_major_answers).items() if v >= 0}
-        ans2label = {k: i for i, k in enumerate(counter.keys())}
-        label2ans = list(counter.keys())
+            # Create label2ans list, assuming labels are sequential starting from 0
+            label2ans = [None] * (max(ans2label.values()) + 1)
+            for ans, label in ans2label.items():
+                label2ans[label] = ans
 
         print(f"Number of labels {len(ans2label)}")
 

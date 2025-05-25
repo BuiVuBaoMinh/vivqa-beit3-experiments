@@ -191,6 +191,7 @@ def normalize_word(token):
 
 
 def segment_normalize(text):
-    normalized_text = text.lower()
-    normalized_text = normalized_text.replace("_", " ")
+    normalized_text = text.replace("_", " ")
+    normalized_text = normalized_text.replace(".", "")
+    normalized_text = normalized_text.lower().strip()
     return normalized_text

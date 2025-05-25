@@ -13,10 +13,12 @@ VIVIQA_DATASET_PATH = "data/vivqa"
 
 data_path = VIVIQA_DATASET_PATH
 annotation_data_path = VIVIQA_DATASET_PATH + "/vqa"
+predefined_dict_path = "/root/projects/exp1/data/vivqa/annotations/dicts/answer2label.txt"
 
 ViVQADataset.make_dataset_index(
     data_path=data_path,
     tokenizer_spm=tokenizer_spm,
     tokenizer_phobert=tokenizer_phobert,
     annotation_data_path=annotation_data_path,
+    predefined_dict_path=predefined_dict_path
 )
