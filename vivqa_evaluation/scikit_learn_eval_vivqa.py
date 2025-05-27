@@ -7,9 +7,9 @@ def segment_normalize(text):
     return normalized_text
 
 def main():
-    gt_file = "/root/projects/exp1/data/vivqa/vqa/test_vi.json"
-    res_file = "/root/projects/exp1/vivqa_scoring/vi/submit_vivqa_test_vi_sorted.json"
-    label_map_file = "/root/projects/exp1/data/vivqa/dicts/answer2label.txt"
+    gt_file = "/root/projects/exp1/data/vivqa/vqa/test_en.json"
+    res_file = "/root/projects/exp1/vivqa_scoring/en/submit_vivqa_test_tn1re_sorted.json"
+    label_map_file = "/root/projects/exp1/data/vivqa/annotations/dicts/answer2label_hand_translated.txt"
 
     # Load label map
     answer_to_label = {}
@@ -26,8 +26,11 @@ def main():
         res_data = json.load(rsf)
 
     # Build dictionaries for fast access
-    gts = {item["id"]: segment_normalize(item["answer"]) for item in gt_data}
-    res = {item["question_id"]: segment_normalize(item["answer"]) for item in res_data}
+    # gts = {item["id"]: segment_normalize(item["answer"]) for item in gt_data}
+    # res = {item["question_id"]: segment_normalize(item["answer"]) for item in res_data}
+
+    gts = {item["id"]: (item["answer"]) for item in gt_data}
+    res = {item["question_id"]: (item["answer"]) for item in res_data}
 
     y_true = []
     y_pred = []
@@ -51,6 +54,11 @@ def main():
         y_pred.append(pred_label)
 
     # Compute F1 score
+    print(f"len(gt_label): {len(gts)}")
+    print(f"len(pred_label): {len(res)}")
+    print(f"len(y_true): {len(y_true)}")
+    print(f"len(y_pred): {len(y_pred)}")
+
     f1 = f1_score(y_true, y_pred, average="macro")
     print(f"F1 Score (macro): {f1:.4f}")
 

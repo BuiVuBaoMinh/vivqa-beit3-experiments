@@ -116,6 +116,13 @@ class Recall:
     def __str__(self) -> str:
         return "Recall"
 
+def simple_tokenize(text):
+    """
+    Convert text to a list of tokens by removing white spaces, and lowercasing.
+    :param  text(str): The text to be tokenized
+    """
+    return text.lower().strip().split()
+
 class ExactMatch:
     def compute_score(self, gts, res):
         """
@@ -128,10 +135,10 @@ class ExactMatch:
         for key in res:
             pred = res[key][0]
             match_scores = [int(pred == gt) for gt in gts[key]]
-            if pred==gts[key][0]:
-                print(f"Wrong pairs id: {key}")
-                print(f"pred: {pred}")
-                print(f"gt: {gts[key][0]}\n")
+            # if pred!=gts[key][0]:
+            #     print(f"Wrong pairs id: {key}")
+            #     print(f"pred: {pred}")
+            #     print(f"gt: {gts[key][0]}\n")
             scores.append(np.mean(match_scores))  # average across references
 
         scores = np.array(scores)
@@ -154,16 +161,19 @@ def get_args():
                         help="Path to result/prediction file (e.g submit_vivqa_test.json)")
     parser.add_argument('--phobert', action='store_true', default=False,
                         help="Use PhoBERT's tokenizer.")
+    parser.add_argument('--simple_tokenize', action='store_true', default=False,
+                        help='Use simple tokenizing method, only lowercase and whitespace split.')
     
     return parser.parse_args()
 
 def main(args):
 
-    if args.phobert:
-        tokenizer = AutoTokenizer.from_pretrained("vinai/phobert-base-v2") # using PhoBERT tokenizer
-    else:
-        tokenizer = XLMRobertaTokenizer("/root/projects/exp1/text-tokenizers/beit3.spm")
-        # tokenizer = XLMRobertaTokenizer("/home/lenovo/exp1/beit3-model-n-ckpts/beit3-model/beit3.spm") # for gcp vm
+    if not args.simple_tokenize:
+        if args.phobert:
+            tokenizer = AutoTokenizer.from_pretrained("vinai/phobert-base-v2") # using PhoBERT tokenizer
+        else:
+            tokenizer = XLMRobertaTokenizer("/root/projects/exp1/text-tokenizers/beit3.spm")
+            # tokenizer = XLMRobertaTokenizer("/home/lenovo/exp1/beit3-model-n-ckpts/beit3-model/beit3.spm") # for gcp vm
 
     gt_file = args.gt_file
     res_file = args.res_file
@@ -177,37 +187,44 @@ def main(args):
 
     gts = {}
     res = {}
-    if args.phobert:
-        for item in gt_data:
-            gts[item["id"]] = tokenizer.tokenize(item["answer"].lower())
+    if not args.simple_tokenize:
+        if args.phobert:
+            for item in gt_data:
+                gts[item["id"]] = tokenizer.tokenize(item["answer"].lower())
 
-        rdrsegmenter = py_vncorenlp.VnCoreNLP(annotators=["wseg"], save_dir='/root/projects/exp1/vncorenlp')
+            rdrsegmenter = py_vncorenlp.VnCoreNLP(annotators=["wseg"], save_dir='/root/projects/exp1/vncorenlp')
 
-        # for item in gt_data:
-        #     segmented_ans = rdrsegmenter.word_segment(item["answer"])
-        #     gts[item["id"]] = tokenizer.tokenize(segmented_ans[0])
-        
-        for item in res_data:
-            segmented_ans = rdrsegmenter.word_segment(item["answer"])
-            res[item["question_id"]] = tokenizer.tokenize(segmented_ans[0])
+            # for item in gt_data:
+            #     segmented_ans = rdrsegmenter.word_segment(item["answer"])
+            #     gts[item["id"]] = tokenizer.tokenize(segmented_ans[0])
+            
+            for item in res_data:
+                segmented_ans = rdrsegmenter.word_segment(item["answer"])
+                res[item["question_id"]] = tokenizer.tokenize(segmented_ans[0])
+        else:
+            for item in gt_data:
+                gts[item["id"]] = tokenizer.tokenize(item["answer"].lower())
+
+            for item in res_data:
+                res[item["question_id"]] = tokenizer.tokenize(item["answer"].lower())
     else:
         for item in gt_data:
-            gts[item["id"]] = tokenizer.tokenize(item["answer"].lower())
+            gts[item["id"]] = simple_tokenize(item["answer"])
 
         for item in res_data:
-            res[item["question_id"]] = tokenizer.tokenize(item["answer"].lower())
+            res[item["question_id"]] = simple_tokenize(item["answer"])
 
-    scorer = Precision()
-    score, details = scorer.compute_score(gts, res)
-    print(f"Token-based Precision Score (P): {score:.4f}")
+    scorer_p = Precision()
+    score_p, details_p = scorer_p.compute_score(gts, res)
+    print(f"Token-based Precision Score (P): {score_p:.4f}")
 
-    scorer = Recall()
-    score, details = scorer.compute_score(gts, res)
-    print(f"Token-based Recall Score (R): {score:.4f}")
+    scorer_r = Recall()
+    score_r, details_r = scorer_r.compute_score(gts, res)
+    print(f"Token-based Recall Score (R): {score_r:.4f}")
 
-    scorer = F1()
-    score, details = scorer.compute_score(gts, res)
-    print(f"Token-based F1 Score (F1): {score:.4f}")
+    scorer_f1 = F1()
+    score_f1, details_f1 = scorer_f1.compute_score(gts, res)
+    print(f"Token-based F1 Score (F1): {score_f1:.4f}")
 
     # Raw string ground truth and result (for Exact Match)
     gts_raw = {}
@@ -219,9 +236,9 @@ def main(args):
         res_raw[item["question_id"]] = [segment_normalize(item["answer"])]
 
     # Compute exact match
-    scorer = ExactMatch()
-    score, details_em = scorer.compute_score(gts_raw, res_raw)
-    print(f"Exact Match Score (EM): {score:.4f}")
+    scorer_em = ExactMatch()
+    score_em, details_em = scorer_em.compute_score(gts_raw, res_raw)
+    print(f"Exact Match Score (EM): {score_em:.4f}")
 
 
 if __name__ == "__main__":
