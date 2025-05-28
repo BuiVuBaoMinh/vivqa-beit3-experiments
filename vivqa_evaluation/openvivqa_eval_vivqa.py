@@ -3,6 +3,7 @@ import json
 import argparse
 import py_vncorenlp
 from transformers import XLMRobertaTokenizer, AutoModel, AutoTokenizer
+import sys
 
 class F1:
     def compute_score(self, gts, res):
@@ -12,27 +13,27 @@ class F1:
                 res (dict)  : dictionary with key <image> and value <tokenized reference sentence>
         :return: f1 (float) : computed F1 score for the corpus
         """
-        res = {key: value[0].split() for key, value in res.items()}
+        # res = {key: value[0].split() for key, value in res.items()}
+        res = {key: value for key, value in res.items()}
         scores = []
         for key in res:
             r = res[key]
             scores_per_res = []
-            for gt in gts[key]:
-                gt = gt.split()
-                # if either the prediction or the truth is no-answer then f1 = 1 if they agree, 0 otherwise
-                if len(r) == 0 or len(gt) == 0:
-                    scores_per_res.append(int(r == gt))
-                    print("F1 no answer")
+            gt = gts[key]
+            # if either the prediction or the truth is no-answer then f1 = 1 if they agree, 0 otherwise
+            if len(r) == 0 or len(gt) == 0:
+                scores_per_res.append(int(r == gt))
+                print("F1 no answer")
+            else:
+                common_tokens = set(r) & set(gt)
+                # if there are no common tokens then f1 = 0
+                if len(common_tokens) == 0:
+                    scores_per_res.append(0)
                 else:
-                    common_tokens = set(r) & set(gt)
-                    # if there are no common tokens then f1 = 0
-                    if len(common_tokens) == 0:
-                        scores_per_res.append(0)
-                    else:
-                        prec = len(common_tokens) / len(r)
-                        rec = len(common_tokens) / len(gt)
+                    prec = len(common_tokens) / len(r)
+                    rec = len(common_tokens) / len(gt)
 
-                        scores_per_res.append(2*(prec*rec)/(prec+rec))
+                    scores_per_res.append(2*(prec*rec)/(prec+rec))
 
             scores_per_res = np.array(scores_per_res).mean()
             scores.append(scores_per_res)
@@ -52,23 +53,23 @@ class Precision:
                 res (dict)  : dictionary with key <image> and value <tokenized reference sentence>
         :return: accuracy (float) : computed Accuracy score for the corpus
         """
-        res = {key: value[0].split() for key, value in res.items()}
+        # res = {key: value[0].split() for key, value in res.items()}
+        res = {key: value for key, value in res.items()}
         scores = []
         for key in res:
             r = res[key]
             scores_per_res = []
-            for gt in gts[key]:
-                gt = gt.split()
-                # if either the prediction or the truth is no-answer then precision = 1 if they agree, 0 otherwise
-                if len(r) == 0 or len(gt) == 0:
-                    scores_per_res.append(int(r == gt))
+            gt = gts[key]
+            # if either the prediction or the truth is no-answer then precision = 1 if they agree, 0 otherwise
+            if len(r) == 0 or len(gt) == 0:
+                scores_per_res.append(int(r == gt))
+            else:
+                common_tokens = set(r) & set(gt)
+                # if there are no common tokens then precision = 0
+                if len(common_tokens) == 0:
+                    scores_per_res.append(0)
                 else:
-                    common_tokens = set(r) & set(gt)
-                    # if there are no common tokens then precision = 0
-                    if len(common_tokens) == 0:
-                        scores_per_res.append(0)
-                    else:
-                        scores_per_res.append(len(common_tokens)/len(r))
+                    scores_per_res.append(len(common_tokens)/len(r))
 
             scores_per_res = np.array(scores_per_res).mean()
             scores.append(scores_per_res)
@@ -88,23 +89,23 @@ class Recall:
                 res (dict)  : dictionary with key <image> and value <tokenized reference sentence>
         :return: accuracy (float) : computed Accuracy score for the corpus
         """
-        res = {key: value[0].split() for key, value in res.items()}
+        # res = {key: value[0].split() for key, value in res.items()}
+        res = {key: value for key, value in res.items()}
         scores = []
         for key in res:
             r = res[key]
             scores_per_res = []
-            for gt in gts[key]:
-                gt = gt.split()
-                # if either the prediction or the truth is no-answer then recall = 1 if they agree, 0 otherwise
-                if len(r) == 0 or len(gt) == 0:
-                    scores_per_res.append(int(r == gt))
+            gt = gts[key]
+            # if either the prediction or the truth is no-answer then recall = 1 if they agree, 0 otherwise
+            if len(r) == 0 or len(gt) == 0:
+                scores_per_res.append(int(r == gt))
+            else:
+                common_tokens = set(r) & set(gt)
+                # if there are no common tokens then recall = 0
+                if len(common_tokens) == 0:
+                    scores_per_res.append(0)
                 else:
-                    common_tokens = set(r) & set(gt)
-                    # if there are no common tokens then recall = 0
-                    if len(common_tokens) == 0:
-                        scores_per_res.append(0)
-                    else:
-                        scores_per_res.append(len(common_tokens)/len(gt))
+                    scores_per_res.append(len(common_tokens)/len(gt))
 
             scores_per_res = np.array(scores_per_res).mean()
             scores.append(scores_per_res)
@@ -239,6 +240,27 @@ def main(args):
     scorer_em = ExactMatch()
     score_em, details_em = scorer_em.compute_score(gts_raw, res_raw)
     print(f"Exact Match Score (EM): {score_em:.4f}")
+
+    # --- Detect anomalies where EM = 1.0 but others < 1.0 ---
+    print("\nAnomalies where EM=1.0 but (F1 < 1.0 or P < 1.0 or R < 1.0):")
+    anomaly_count = 0
+    for idx, key in enumerate(res_raw.keys()):
+        em = details_em[idx]
+        f1 = details_f1[idx]
+        p = details_p[idx]
+        r = details_r[idx]
+
+        if em == 1.0 and (f1 < 1.0 or p < 1.0 or r < 1.0):
+            anomaly_count += 1
+            print(f"\nAnomaly {anomaly_count}")
+            print(f"ID: {key}")
+            print(f"EM: {em}, F1: {f1:.4f}, P: {p:.4f}, R: {r:.4f}")
+            print(f"GT Answer(s): {gts_raw[key][0]}")
+            print(f"Predicted Answer: {res_raw[key][0]}")
+            print(f"Tokenized GT: {simple_tokenize(gts_raw[key][0])}")
+            print(f"Tokenized Prediction: {simple_tokenize(res_raw[key][0])}")
+
+    print(f"\nTotal anomalies found: {anomaly_count}")
 
 
 if __name__ == "__main__":

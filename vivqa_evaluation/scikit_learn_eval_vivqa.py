@@ -1,4 +1,5 @@
 import json
+import argparse
 from sklearn.metrics import precision_score, recall_score, f1_score
 
 def segment_normalize(text):
@@ -6,10 +7,22 @@ def segment_normalize(text):
     normalized_text = normalized_text.replace("_", " ")
     return normalized_text
 
-def main():
-    gt_file = "/root/projects/exp1/data/vivqa/vqa/test_en.json"
-    res_file = "/root/projects/exp1/vivqa_scoring/en/submit_vivqa_test_tn1re_sorted.json"
-    label_map_file = "/root/projects/exp1/data/vivqa/annotations/dicts/answer2label_hand_translated.txt"
+def get_args():
+    parser = argparse.ArgumentParser('sklearn eval P, R, F1 for vivqa.', add_help=False)
+
+    parser.add_argument('--gt_file', required=True, type=str,
+                        help="Path to ground truth file (e.g test.json)")
+    parser.add_argument('--res_file', required=True, type=str,
+                        help="Path to result/prediction file (e.g submit_vivqa_test.json)")
+    parser.add_argument('--answer2label', required=True, type=str,
+                        help="Path of answer2label.txt.")
+    
+    return parser.parse_args()
+
+def main(args):
+    gt_file = args.gt_file
+    res_file = args.res_file
+    label_map_file = args.answer2label
 
     # Load label map
     answer_to_label = {}
@@ -72,4 +85,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    opts = get_args()
+    main(opts)
