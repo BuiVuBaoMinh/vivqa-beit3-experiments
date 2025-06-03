@@ -297,7 +297,7 @@ def main(args, ds_init):
         print("Beit3 embedding class: ", type(new_layer))
 
         # Strat 0: Only replace the text embed, train all layers.
-        # print("Strat 0: Finetune train all layers!")
+        print("Strat 0: Finetune train all layers!")
 
         # Strat 1: Freeze all except text embed and text (B) experts, pooler, head
         # for name, param in model.named_parameters():
@@ -314,17 +314,17 @@ def main(args, ds_init):
 
         # Strat 2: Freeze all except text (B) experts, pooler, head
         # Question: "The text embedding from phobert is pretrained on vi, do we need to finetune it? Let's freeze"
-        for name, param in model.named_parameters():
-            # Freeze vision-embedding and A-expert parameters (do not train)
-            if name.startswith("beit3.vision_embed") or ".A." in name:
-                param.requires_grad = False
-            # Allow training of text embedding and B-expert parameters
-            elif ".B." in name:
-                param.requires_grad = True
-            elif name.startswith("pooler") or name.startswith("head"):
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
+        # for name, param in model.named_parameters():
+        #     # Freeze vision-embedding and A-expert parameters (do not train)
+        #     if name.startswith("beit3.vision_embed") or ".A." in name:
+        #         param.requires_grad = False
+        #     # Allow training of text embedding and B-expert parameters
+        #     elif ".B." in name:
+        #         param.requires_grad = True
+        #     elif name.startswith("pooler") or name.startswith("head"):
+        #         param.requires_grad = True
+        #     else:
+        #         param.requires_grad = False
 
     # Check the frozen parameters
     with open(args.output_dir + "/Model_Architecture.txt", "w") as f:
