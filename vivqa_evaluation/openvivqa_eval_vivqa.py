@@ -23,7 +23,6 @@ class F1:
             # if either the prediction or the truth is no-answer then f1 = 1 if they agree, 0 otherwise
             if len(r) == 0 or len(gt) == 0:
                 scores_per_res.append(int(r == gt))
-                print("F1 no answer")
             else:
                 common_tokens = set(r) & set(gt)
                 # if there are no common tokens then f1 = 0
@@ -122,6 +121,7 @@ def simple_tokenize(text):
     Convert text to a list of tokens by removing white spaces, and lowercasing.
     :param  text(str): The text to be tokenized
     """
+    text = text.replace("_", " ")
     return text.lower().strip().split()
 
 class ExactMatch:

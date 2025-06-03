@@ -16,6 +16,8 @@ def get_args():
                         help="Path to result/prediction file (e.g submit_vivqa_test.json)")
     parser.add_argument('--answer2label', required=True, type=str,
                         help="Path of answer2label.txt.")
+    parser.add_argument('--average', default='macro', type=str,
+                        help="Specifies the macro param in sklearn eval functions.")
     
     return parser.parse_args()
 
@@ -23,6 +25,7 @@ def main(args):
     gt_file = args.gt_file
     res_file = args.res_file
     label_map_file = args.answer2label
+    average = args.average
 
     # Load label map
     answer_to_label = {}
@@ -39,11 +42,11 @@ def main(args):
         res_data = json.load(rsf)
 
     # Build dictionaries for fast access
-    # gts = {item["id"]: segment_normalize(item["answer"]) for item in gt_data}
-    # res = {item["question_id"]: segment_normalize(item["answer"]) for item in res_data}
+    gts = {item["id"]: segment_normalize(item["answer"]) for item in gt_data}
+    res = {item["question_id"]: segment_normalize(item["answer"]) for item in res_data}
 
-    gts = {item["id"]: (item["answer"]) for item in gt_data}
-    res = {item["question_id"]: (item["answer"]) for item in res_data}
+    # gts = {item["id"]: (item["answer"]) for item in gt_data}
+    # res = {item["question_id"]: (item["answer"]) for item in res_data}
 
     y_true = []
     y_pred = []
@@ -56,11 +59,11 @@ def main(args):
         pred_label = answer_to_label.get(pred_answer, -1)
 
         # Skip examples with unknown answers
-        if gt_label == -1 or pred_label == -1:
+        if gt_label == -1: #or pred_label == -1:
             if (gt_label == -1):
                 print(f"Unknown gt_label: {qid} - {gts[qid]}")
-            if (pred_label == -1):
-                print(f"Unknown pred_label: {qid} - {res[qid]}")
+            # if (pred_label == -1):
+            #     print(f"Unknown pred_label: {qid} - {res[qid]}")
             continue
 
         y_true.append(gt_label)
@@ -72,16 +75,16 @@ def main(args):
     print(f"len(y_true): {len(y_true)}")
     print(f"len(y_pred): {len(y_pred)}")
 
-    f1 = f1_score(y_true, y_pred, average="macro")
-    print(f"F1 Score (macro): {f1:.4f}")
+    f1 = f1_score(y_true, y_pred, average=average)
+    print(f"F1 Score ({average}): {f1:.4f}")
 
     # Compute Precision score
-    p = precision_score(y_true, y_pred, average="macro")
-    print(f"Precision Score (macro): {p:.4f}")
+    p = precision_score(y_true, y_pred, average=average)
+    print(f"Precision Score ({average}): {p:.4f}")
 
     # Compute Recall score
-    r = recall_score(y_true, y_pred, average="macro")
-    print(f"Recall Score (macro): {r:.4f}")
+    r = recall_score(y_true, y_pred, average=average)
+    print(f"Recall Score ({average}): {r:.4f}")
 
 
 if __name__ == "__main__":
