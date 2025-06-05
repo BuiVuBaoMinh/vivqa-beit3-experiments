@@ -203,6 +203,8 @@ def get_args():
     # For Phobert Vivqa experiments
     parser.add_argument('--phobert', action='store_true', default=False,
                         help="Specify whether replacing the phobert's tokenizer and embedding layers or not")
+    parser.add_argument('--patience', type=int, default=5,
+                        help='Number of training epochs without improvements.')
 
     known_args, _ = parser.parse_known_args()
 
@@ -297,7 +299,7 @@ def main(args, ds_init):
         print("Beit3 embedding class: ", type(new_layer))
 
         # Strat 0: Only replace the text embed, train all layers.
-        print("Strat 0: Finetune train all layers!")
+        # print("Strat 0: Finetune train all layers!")
 
         # Strat 1: Freeze all except text embed and text (B) experts, pooler, head
         # for name, param in model.named_parameters():
@@ -314,17 +316,17 @@ def main(args, ds_init):
 
         # Strat 2: Freeze all except text (B) experts, pooler, head
         # Question: "The text embedding from phobert is pretrained on vi, do we need to finetune it? Let's freeze"
-        # for name, param in model.named_parameters():
-        #     # Freeze vision-embedding and A-expert parameters (do not train)
-        #     if name.startswith("beit3.vision_embed") or ".A." in name:
-        #         param.requires_grad = False
-        #     # Allow training of text embedding and B-expert parameters
-        #     elif ".B." in name:
-        #         param.requires_grad = True
-        #     elif name.startswith("pooler") or name.startswith("head"):
-        #         param.requires_grad = True
-        #     else:
-        #         param.requires_grad = False
+        for name, param in model.named_parameters():
+            # Freeze vision-embedding and A-expert parameters (do not train)
+            if name.startswith("beit3.vision_embed") or ".A." in name:
+                param.requires_grad = False
+            # Allow training of text embedding and B-expert parameters
+            elif ".B." in name:
+                param.requires_grad = True
+            elif name.startswith("pooler") or name.startswith("head"):
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
 
     # Check the frozen parameters
     with open(args.output_dir + "/Model_Architecture.txt", "w") as f:
@@ -470,7 +472,10 @@ def main(args, ds_init):
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
 
-    max_accuracy = 0.0
+    max_accuracy, epochs_without_improvements = utils.get_max_accuracy_and_no_improvement_streak(args.output_dir)
+    print(f"This section's initial max_accuracy: {max_accuracy}")
+    print(f"This section's initial epochs_without_improvements: {epochs_without_improvements}")
+    patience = args.patience
     for epoch in range(args.start_epoch, args.epochs):
 
         epoch_start_time = time.time()
@@ -507,10 +512,16 @@ def main(args, ds_init):
             print(f"Performance of the network on the {len(data_loader_val.dataset)} val images: {test_stats[task_key]:.1f}%")
             if max_accuracy < test_stats[task_key]:
                 max_accuracy = test_stats[task_key]
+                epochs_without_improvements = 0 # Reset patience
                 if args.output_dir and args.save_ckpt:
                     utils.save_model(
                         args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                         loss_scaler=loss_scaler, epoch="best", model_ema=model_ema)
+            else:
+                epochs_without_improvements += 1
+                if epochs_without_improvements >= patience:
+                    print(f"No improvement in {patience} consecutive epochs. Early stopping.")
+                    break
 
             print(f'Max performance: {max_accuracy:.2f}%')
             if log_writer is not None:

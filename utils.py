@@ -912,3 +912,37 @@ def coco_caption_eval(gt_dir, results_file, split):
         res_dict[metric] = score
     
     return res_dict
+
+# Custom utils for Vietnamese Integration experiments
+def get_max_accuracy_and_no_improvement_streak(output_dir):
+    log_path = os.path.join(output_dir, "log.txt")
+    max_accuracy = 0.0
+    val_scores = []
+
+    if not os.path.exists(log_path):
+        print(f"Log file not found at: {log_path}")
+        return max_accuracy, 0
+
+    with open(log_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or not line.startswith('{'):
+                continue  # skip malformed or empty lines
+            try:
+                entry = json.loads(line)
+                if 'val_score' in entry:
+                    val = entry['val_score']
+                    val_scores.append(val)
+                    max_accuracy = max(max_accuracy, val)
+            except json.JSONDecodeError:
+                continue  # skip bad JSON lines
+
+    # Now calculate the streak of epochs from the end with no improvement
+    epochs_without_improvement = 0
+    for score in reversed(val_scores):
+        if score < max_accuracy:
+            epochs_without_improvement += 1
+        else:
+            break  # last improvement was here, stop counting
+
+    return max_accuracy, epochs_without_improvement
