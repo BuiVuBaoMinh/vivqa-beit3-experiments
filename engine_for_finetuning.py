@@ -222,49 +222,9 @@ class VQAHandler(TaskHandler):
         if labels is not None:
             scores = utils.VQAScore()(logits, labels) * 100.0
             self.metric_logger.meters['score'].update(scores.item(), n=batch_size)
-        else:
-            _, preds = logits.max(-1)
-            for image_id, pred in zip(qid, preds):
-                self.predictions.append({
-                    "question_id": image_id.item(), 
-                    "answer": self.label2ans[pred.item()], 
-                })
 
-    def after_eval(self, **kwargs):
-        if len(self.predictions) == 0:
-            print('* Score {score.global_avg:.3f}'.format(score=self.metric_logger.score))
-            return {k: meter.global_avg for k, meter in self.metric_logger.meters.items()}, "score"
-        else:
-            return self.predictions, "prediction"
-
-class OpenViVQAHandler(TaskHandler):
-    def __init__(self) -> None:
-        super().__init__()
-        self.predictions = []
-        self.criterion = nn.BCEWithLogitsLoss(reduction='mean')
-        self.label2ans = None
-
-    def train_batch(self, model, image, language_tokens, padding_mask, labels):
-        logits = model(
-            image=image, question=language_tokens, 
-            padding_mask=padding_mask)
-        return {
-            "loss": self.criterion(input=logits.float(), target=labels.float()) * labels.shape[1], 
-        }
-
-    def before_eval(self, metric_logger, data_loader, **kwargs):
-        self.predictions.clear()
-        self.metric_logger = metric_logger
-        self.label2ans = data_loader.dataset.label2ans
-
-    def eval_batch(self, model, image, language_tokens, padding_mask, labels=None, qid=None):
-        logits = model(
-            image=image, question=language_tokens, 
-            padding_mask=padding_mask)
-        batch_size = language_tokens.shape[0]
-        if labels is not None:
-            scores = utils.VQAScore()(logits, labels) * 100.0
-            self.metric_logger.meters['score'].update(scores.item(), n=batch_size)
+            loss = self.criterion(input=logits.float(), target=labels.float()) * labels.shape[1]
+            self.metric_logger.meters['loss'].update(loss.item(), n=batch_size)
         else:
             _, preds = logits.max(-1)
             for image_id, pred in zip(qid, preds):

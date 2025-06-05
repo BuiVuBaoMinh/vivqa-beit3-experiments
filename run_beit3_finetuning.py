@@ -13,6 +13,7 @@ import torch
 import torch.backends.cudnn as cudnn
 import json
 import os
+import sys
 
 from pathlib import Path
 
@@ -534,7 +535,7 @@ def main(args, ds_init):
                         'time': time.time() - epoch_start_time}
         else:
             log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                         # **{f'test_{k}': v for k, v in test_stats.items()},
+                         **{f'test_{k}': v for k, v in test_stats.items()},
                          'epoch': epoch,
                          'n_parameters': n_parameters,
                          'time': time.time() - epoch_start_time}
