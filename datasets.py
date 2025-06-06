@@ -1328,4 +1328,5 @@ def create_downstream_dataset(args, is_eval=False, phobert_tokenizer=None):
     else:
         return \
             create_dataset_by_split(args, split="train", is_train=True, phobert_tokenizer=phobert_tokenizer), \
-            create_dataset_by_split(args, split="val", is_train=True, phobert_tokenizer=phobert_tokenizer)
+            create_dataset_by_split(args, split="val", is_train=True, phobert_tokenizer=phobert_tokenizer), \
+            create_dataset_by_split(args, split="train", is_train=False, phobert_tokenizer=phobert_tokenizer)

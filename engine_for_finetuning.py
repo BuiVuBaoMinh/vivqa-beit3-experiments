@@ -205,8 +205,14 @@ class VQAHandler(TaskHandler):
         logits = model(
             image=image, question=language_tokens, 
             padding_mask=padding_mask)
+
+        batch_size = language_tokens.shape[0]
+        scores = utils.VQAScore()(logits, labels) * 100.0
+
         return {
             "loss": self.criterion(input=logits.float(), target=labels.float()) * labels.shape[1], 
+            "scores": scores, \
+            "batch_size": batch_size,
         }
 
     def before_eval(self, metric_logger, data_loader, **kwargs):
@@ -443,8 +449,6 @@ def get_handler(args):
         return NLVR2Handler()
     elif args.task == "vqav2":
         return VQAHandler()
-    elif args.task == "openvivqa":
-        return OpenViVQAHandler()
     elif args.task == "vivqa":
         return VQAHandler()
     elif args.task in ("flickr30k", "coco_retrieval"):
@@ -479,6 +483,7 @@ def train_one_epoch(
     else:
         optimizer.zero_grad()
 
+
     for data_iter_step, data in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         step = data_iter_step // update_freq
         global_step = start_steps + step  # global training iteration
@@ -509,6 +514,11 @@ def train_one_epoch(
 
         loss = results.pop("loss")
         loss_value = loss.item()
+
+        scores = results.pop("scores")
+        batch_size = results.pop("batch_size")
+
+        metric_logger.meters['score'].update(scores.item(), n=batch_size)
 
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))

@@ -14,6 +14,7 @@ import torch.backends.cudnn as cudnn
 import json
 import os
 import sys
+import copy
 
 from pathlib import Path
 
@@ -257,7 +258,7 @@ def main(args, ds_init):
         phobert_tokenizer = AutoTokenizer.from_pretrained("vinai/phobert-base-v2") # using PhoBERT tokenizer
         phobert_model = AutoModel.from_pretrained("vinai/phobert-base-v2") # Get word_embedding from phobert to replace text_embed
 
-    data_loader_train, data_loader_val = create_downstream_dataset(args, phobert_tokenizer=phobert_tokenizer)
+    data_loader_train, data_loader_val, data_loader_train_eval = create_downstream_dataset(args, phobert_tokenizer=phobert_tokenizer)
 
     if not args.model.endswith(args.task):
         if args.task in ("flickr30k", "coco_retrieval"):
@@ -429,6 +430,7 @@ def main(args, ds_init):
         optimizer=optimizer, loss_scaler=loss_scaler, model_ema=model_ema)
 
     task_handler = get_handler(args)
+    safe_eval_handler = copy.deepcopy(task_handler)
 
     # mixup for imagenet
     mixup_fn = None
@@ -490,11 +492,17 @@ def main(args, ds_init):
             epoch * num_training_steps_per_epoch, lr_schedule_values, loss_scaler, 
             args.clip_grad, args.update_freq, model_ema, log_writer, args.task, mixup_fn,
         )
+
+        # Get epoch's train_score
+        # train_eval_stats, _ = evaluate(data_loader_train_eval, model, device, safe_eval_handler)
+        # train_stats["score"] = train_eval_stats["score"]  
+
         if args.output_dir and args.save_ckpt:
             if (epoch + 1) % args.save_ckpt_freq == 0 or epoch + 1 == args.epochs:
                 utils.save_model(
                     args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                     loss_scaler=loss_scaler, epoch=epoch, model_ema=model_ema)
+                
         if data_loader_val is not None:
             if args.task not in ["coco_captioning", "nocaps"]:
                 test_stats, task_key = evaluate(data_loader_val, model, device, task_handler)
@@ -520,9 +528,6 @@ def main(args, ds_init):
                         loss_scaler=loss_scaler, epoch="best", model_ema=model_ema)
             else:
                 epochs_without_improvements += 1
-                if epochs_without_improvements >= patience:
-                    print(f"No improvement in {patience} consecutive epochs. Early stopping.")
-                    break
 
             print(f'Max performance: {max_accuracy:.2f}%')
             if log_writer is not None:
@@ -545,6 +550,10 @@ def main(args, ds_init):
                 log_writer.flush()
             with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
+
+        if epochs_without_improvements >= patience:
+            print(f"No improvement in {patience} consecutive epochs. Early stopping.")
+            break
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
