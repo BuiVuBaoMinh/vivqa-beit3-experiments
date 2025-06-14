@@ -1,13 +1,14 @@
 import json
 import os
 import torch
+import sys
 
 from PIL import Image
 from transformers import MT5Tokenizer, ViTImageProcessor
 from torch.utils.data import DataLoader
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import utils
-
 
 class ViVQAPaLIDataset(torch.utils.data.Dataset):
     def __init__(self,
@@ -87,13 +88,14 @@ def create_pali_dataloader(dataset, is_train, batch_size, num_workers, pin_mem, 
     )
 
 def create_pali_dataset_by_split(args, split, is_train=True, phobert_tokenizer=None):
-    json_path = args.data_path + f"/vqa/{split}_{"en" if phobert_tokenizer is None else "vi"}.json"
+    json_path = args.data_path + f"/vqa/{split}_{'en' if phobert_tokenizer is None else 'vi'}.json"
     if split=="train" or split=="val":
         image_dir = args.data_path + "/images/train"
     if split=="test":
         image_dir = args.data_path + "/images/test"
 
     dataset = ViVQAPaLIDataset(
+        args=args,
         json_path=json_path,
         image_dir=image_dir,
         split=split,
@@ -118,8 +120,13 @@ def create_pali_datasets(args, is_eval=False, phobert_tokenizer=None):
     if is_eval:
         return create_pali_dataset_by_split(args, split="test", is_train=False, phobert_tokenizer=phobert_tokenizer)
     else:
-        return \
-            create_pali_dataset_by_split(args, split="train", is_train=True, phobert_tokenizer=phobert_tokenizer), \
-            create_pali_dataset_by_split(args, split="val", is_train=True, phobert_tokenizer=phobert_tokenizer)
+        dataset_train, data_loader_train =create_pali_dataset_by_split(
+            args, split="train", is_train=True, phobert_tokenizer=phobert_tokenizer
+        )
+        dataset_val, data_loader_val = create_pali_dataset_by_split(
+            args, split="val", is_train=True, phobert_tokenizer=phobert_tokenizer
+        )
+        return dataset_train, data_loader_train, dataset_val, data_loader_val
+            
 
 

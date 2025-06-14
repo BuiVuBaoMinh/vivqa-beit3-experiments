@@ -1,7 +1,7 @@
 import json
 
-train_en_full = "/root/projects/exp1/data/vivqa/vqa/train_en_full.json"
-train_vi_full = "/root/projects/exp1/data/vivqa/vqa/train_vi_full.json"
+train_en_full = "/home/lenovo/exp1/data/vivqa/vqa/train_en_full.json"
+train_vi_full = "/home/lenovo/exp1/data/vivqa/vqa/train_vi_full.json"
 
 with open(train_en_full, "r", encoding="utf-8") as en_f:
     train_en_full_data = json.load(en_f)

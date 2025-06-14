@@ -60,6 +60,8 @@ def get_args():
 
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
+    parser.add_argument('--log_dir', default=None,
+                        help='path where to tensorboard log')
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
     parser.add_argument('--seed', default=0, type=int)
@@ -143,7 +145,7 @@ def main(args, ds_init):
 
     phobert_model = None
     phobert_tokenizer = None
-    if args.task == 'vivqa' and args.phobert:
+    if args.phobert:
         phobert_tokenizer = AutoTokenizer.from_pretrained("vinai/phobert-base-v2") # using PhoBERT tokenizer
         phobert_model = AutoModel.from_pretrained("vinai/phobert-base-v2") # Get word_embedding from phobert to replace text_embed
 
@@ -152,12 +154,7 @@ def main(args, ds_init):
         phobert_tokenizer=phobert_tokenizer
     )
 
-    assert isinstance(dataset_train, ViVQAPaLIDataset)
-    assert isinstance(data_loader_train, DataLoader)
-    assert isinstance(dataset_val, ViVQAPaLIDataset)
-    assert isinstance(data_loader_val, DataLoader)
-    assert dataset_train.split == "train"
-    assert dataset_val.split == "val"
+    sys.exit(0)
     
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
