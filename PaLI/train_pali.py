@@ -2,14 +2,16 @@ import argparse
 import time
 import numpy as np
 import os
+import sys
+import json
 from pathlib import Path
 
 from torch.utils.data import DataLoader
 import torch
 from torch.optim import AdamW
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer, PhobertTokenizer
 
-from pali_dataset import ViVQAPaLIDataset
+from pali_dataset import ViVQAPaLIDataset, create_pali_datasets
 from pali import PaLI
 
 import utils
@@ -53,7 +55,7 @@ def get_args():
     parser.add_argument('--save_ckpt_freq', default=5, type=int)
 
      # Dataset parameters
-    parser.add_argument('--data_path', default='/datasets01/imagenet_full_size/061417/', type=str,
+    parser.add_argument('--data_path', default='/root/projects/exp1/data/vivqa', type=str,
                         help='dataset path')
 
     parser.add_argument('--output_dir', default='',
@@ -145,10 +147,17 @@ def main(args, ds_init):
         phobert_tokenizer = AutoTokenizer.from_pretrained("vinai/phobert-base-v2") # using PhoBERT tokenizer
         phobert_model = AutoModel.from_pretrained("vinai/phobert-base-v2") # Get word_embedding from phobert to replace text_embed
 
-    data_loader_train, data_loader_val = create_downstream_dataset(
+    dataset_train, data_loader_train, dataset_val, data_loader_val = create_pali_datasets(
         args,
         phobert_tokenizer=phobert_tokenizer
     )
+
+    assert isinstance(dataset_train, ViVQAPaLIDataset)
+    assert isinstance(data_loader_train, DataLoader)
+    assert isinstance(dataset_val, ViVQAPaLIDataset)
+    assert isinstance(data_loader_val, DataLoader)
+    assert dataset_train.split == "train"
+    assert dataset_val.split == "val"
     
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
@@ -182,19 +191,7 @@ def main(args, ds_init):
                     loss_scaler=loss_scaler, epoch=epoch, model_ema=model_ema)
                 
         if data_loader_val is not None:
-            if args.task not in ["coco_captioning", "nocaps"]:
-                test_stats, task_key = evaluate(data_loader_val, model, device, task_handler)
-            else:
-                predictions, _ = evaluate(data_loader_val, model, device, task_handler)
-                prediction_file = utils.dump_predictions(args, predictions, f"{args.task}_val_e{epoch}")
-                result_file = os.path.join(args.output_dir, f"{args.task}_result_val_e{epoch}.json")
-                task_key = "CIDEr"
-                if utils.is_main_process():
-                    test_stats = utils.coco_caption_eval(args.output_dir, prediction_file, "{}_val".format(args.task))
-                    utils.write_result_to_jsonl(test_stats, result_file)
-                torch.distributed.barrier()
-                if not utils.is_main_process():
-                    test_stats = utils.read_result_from_jsonl(result_file)
+            test_stats, task_key = evaluate(data_loader_val, model, device, task_handler)
 
             print(f"Performance of the network on the {len(data_loader_val.dataset)} val images: {test_stats[task_key]:.1f}%")
             if max_accuracy < test_stats[task_key]:
