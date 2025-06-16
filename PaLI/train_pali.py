@@ -5,16 +5,23 @@ import os
 import sys
 import json
 from pathlib import Path
+import copy
 
 from torch.utils.data import DataLoader
 import torch
 from torch.optim import AdamW
 from transformers import AutoModel, AutoTokenizer, PhobertTokenizer
 
+from timm.utils import ModelEma
+from optim_factory import create_optimizer, get_parameter_groups, \
+    LayerDecayValueAssigner, get_is_head_flag_for_vit
+
 from pali_dataset import ViVQAPaLIDataset, create_pali_datasets
 from pali import PaLI
+from pali_engine_for_finetuning import PaLIHandler, pali_evaluate, pali_train_one_epoch
 
 import utils
+from utils import NativeScalerWithGradNormCount as NativeScaler
 
 
 def get_args():
@@ -154,6 +161,96 @@ def main(args, ds_init):
         phobert_tokenizer=phobert_tokenizer
     )
 
+    model =PaLI(device=device).to(device, non_blocking=True)
+
+    model.train()
+
+    model_ema = None
+    if args.model_ema:
+        # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
+        model_ema = ModelEma(
+            model,
+            decay=args.model_ema_decay,
+            device='cpu' if args.model_ema_force_cpu else '',
+            resume='')
+        print("Using EMA with decay = %.8f" % args.model_ema_decay)
+
+    model_without_ddp = model
+    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    print("Model = %s" % str(model_without_ddp))
+    print('number of params:', n_parameters)
+
+    total_batch_size = args.batch_size * args.update_freq * utils.get_world_size()
+    num_training_steps_per_epoch = len(data_loader_train) // total_batch_size
+    print("LR = %.8f" % args.lr)
+    print("Batch size = %d" % total_batch_size)
+    print("Update frequent = %d" % args.update_freq)
+    print("Number of training examples = %d" % len(data_loader_train))
+    print("Number of training training per epoch = %d" % num_training_steps_per_epoch)
+
+    num_layers = model_without_ddp.get_num_layers()
+    if args.layer_decay < 1.0:
+        lrs = list(args.layer_decay ** (num_layers + 1 - i) for i in range(num_layers + 2))
+        assigner = LayerDecayValueAssigner(lrs)
+    elif args.task_head_lr_weight > 1:
+        assigner = LayerDecayValueAssigner([1.0, args.task_head_lr_weight], scale_handler=get_is_head_flag_for_vit)
+    else:
+        assigner = None
+
+    if assigner is not None:
+        print("Assigned values = %s" % str(assigner.values))
+
+    skip_weight_decay_list = model.no_weight_decay()
+
+    if args.distributed:
+        torch.distributed.barrier()
+    if args.enable_deepspeed:
+        loss_scaler = None
+        optimizer_params = get_parameter_groups(
+            model, args.weight_decay, skip_weight_decay_list,
+            assigner.get_layer_id if assigner is not None else None,
+            assigner.get_scale if assigner is not None else None)
+        model, optimizer, _, _ = ds_init(
+            args=args, model=model, model_parameters=optimizer_params,
+            dist_init_required=not args.distributed,
+        )
+
+        print("model.gradient_accumulation_steps() = %d" % model.gradient_accumulation_steps())
+        assert model.gradient_accumulation_steps() == args.update_freq
+    else:
+        if args.distributed:
+            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
+            model_without_ddp = model.module
+
+        optimizer = create_optimizer(
+            args, model_without_ddp, skip_list=skip_weight_decay_list,
+            get_num_layer=assigner.get_layer_id if assigner is not None else None, 
+            get_layer_scale=assigner.get_scale if assigner is not None else None)
+        loss_scaler = NativeScaler()
+
+    lr_schedule_values = utils.cosine_scheduler(
+        args.lr, args.min_lr, args.epochs, num_training_steps_per_epoch,
+        warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
+    )
+
+    utils.auto_load_model(
+        args=args, model=model, model_without_ddp=model_without_ddp,
+        optimizer=optimizer, loss_scaler=loss_scaler, model_ema=model_ema)
+
+    task_handler = PaLIHandler(args)
+    safe_eval_handler = copy.deepcopy(task_handler)
+
+    if args.eval:
+        dataset_test, data_loader_test = create_pali_datasets(
+        args,
+        is_eval = True,
+        phobert_tokenizer = phobert_tokenizer 
+        )
+        result, _ = pali_evaluate(data_loader_test, model, device, task_handler)
+        utils.dump_predictions(args, result, "vivqa_test")
+        exit(0)
+    
     sys.exit(0)
     
     print(f"Start training for {args.epochs} epochs")

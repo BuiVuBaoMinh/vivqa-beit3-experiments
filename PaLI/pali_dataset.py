@@ -30,7 +30,7 @@ class ViVQAPaLIDataset(torch.utils.data.Dataset):
             self.tokenizer = MT5Tokenizer.from_pretrained(mt5_model_name)
 
         self.input_max_length = 50
-        self.label_max_length = 5
+        self.label_max_length = 3
         self.split = split
 
     def __getitem__(self, idx):
