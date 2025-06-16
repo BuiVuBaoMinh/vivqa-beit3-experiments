@@ -13,19 +13,26 @@ from torch.optim import AdamW
 from transformers import AutoModel, AutoTokenizer, PhobertTokenizer
 
 from timm.utils import ModelEma
-from optim_factory import create_optimizer, get_parameter_groups, \
-    LayerDecayValueAssigner, get_is_head_flag_for_vit
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from pali_dataset import ViVQAPaLIDataset, create_pali_datasets
 from pali import PaLI
 from pali_engine_for_finetuning import PaLIHandler, pali_evaluate, pali_train_one_epoch
+from pali_utils import pali_dump_predictions
 
 import utils
 from utils import NativeScalerWithGradNormCount as NativeScaler
+from optim_factory import create_optimizer, get_parameter_groups, \
+    LayerDecayValueAssigner, get_is_head_flag_for_vit
 
 
 def get_args():
     parser = argparse.ArgumentParser('PaLI fine-tuning and evaluation script for image classification', add_help=False)
+    # Model parameters
+    parser.add_argument('--model_ema', action='store_true', default=False)
+    parser.add_argument('--model_ema_decay', type=float, default=0.9999, help='')
+    parser.add_argument('--model_ema_force_cpu', action='store_true', default=False, help='')
 
     # Optimizer parameters
     parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
@@ -102,6 +109,9 @@ def get_args():
     parser.add_argument('--dist_url', default='env://',
                         help='url used to set up distributed training')
 
+    # parameter for dump predictions (VQA, COCO captioning, NoCaps)
+    parser.add_argument('--task_cache_path', default=None, type=str)
+
     # For Phobert Vivqa experiments
     parser.add_argument('--phobert', action='store_true', default=False,
                         help="Specify whether replacing the phobert's tokenizer and embedding layers or not")
@@ -136,6 +146,9 @@ def main(args, ds_init):
 
     if ds_init is not None:
         utils.create_ds_config(args)
+
+    if args.task_cache_path is None:
+        args.task_cache_path = args.output_dir
 
     device = torch.device(args.device)
 
@@ -190,6 +203,7 @@ def main(args, ds_init):
     print("Number of training training per epoch = %d" % num_training_steps_per_epoch)
 
     num_layers = model_without_ddp.get_num_layers()
+    print(num_layers)
     if args.layer_decay < 1.0:
         lrs = list(args.layer_decay ** (num_layers + 1 - i) for i in range(num_layers + 2))
         assigner = LayerDecayValueAssigner(lrs)
@@ -238,7 +252,7 @@ def main(args, ds_init):
         args=args, model=model, model_without_ddp=model_without_ddp,
         optimizer=optimizer, loss_scaler=loss_scaler, model_ema=model_ema)
 
-    task_handler = PaLIHandler(args)
+    task_handler = PaLIHandler()
     safe_eval_handler = copy.deepcopy(task_handler)
 
     if args.eval:
@@ -247,8 +261,8 @@ def main(args, ds_init):
         is_eval = True,
         phobert_tokenizer = phobert_tokenizer 
         )
-        result, _ = pali_evaluate(data_loader_test, model, device, task_handler)
-        utils.dump_predictions(args, result, "vivqa_test")
+        result, _ = pali_evaluate(data_loader_test, model, dataset_test.tokenizer, device, task_handler)
+        pali_dump_predictions(args, result, "vivqa_pali_test")
         exit(0)
     
     sys.exit(0)
