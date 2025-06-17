@@ -63,18 +63,8 @@ class ViVQAPaLIDataset(torch.utils.data.Dataset):
 
 
 def create_pali_dataloader(dataset, is_train, batch_size, num_workers, pin_mem, dist_eval=False):
-    if is_train or dist_eval:
-        num_tasks = utils.get_world_size()
-        global_rank = utils.get_rank()
-
-        if not is_train and dist_eval and len(dataset) % num_tasks != 0:
-            print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
-                    'This will slightly alter validation results as extra duplicate entries are added to achieve '
-                    'equal num of samples per-process.')
-
-        sampler = torch.utils.data.DistributedSampler(
-            dataset, num_replicas=num_tasks, rank=global_rank, shuffle=is_train
-        )
+    if is_train:
+        sampler = torch.utils.data.RandomSampler(dataset)
     else:
         sampler = torch.utils.data.SequentialSampler(dataset)
     

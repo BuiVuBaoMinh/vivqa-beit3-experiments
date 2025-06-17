@@ -7,32 +7,27 @@ import json
 from pathlib import Path
 import copy
 
+from tqdm import tqdm
+
 from torch.utils.data import DataLoader
 import torch
 from torch.optim import AdamW
 from transformers import AutoModel, AutoTokenizer, PhobertTokenizer
 
-from timm.utils import ModelEma
-
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from pali_dataset import ViVQAPaLIDataset, create_pali_datasets
 from pali import PaLI
-from pali_engine_for_finetuning import PaLIHandler, pali_evaluate, pali_train_one_epoch
+from pali_engine_for_finetuning import PaLIHandler, pali_evaluate
 from pali_utils import pali_dump_predictions
 
 import utils
-from utils import NativeScalerWithGradNormCount as NativeScaler
 from optim_factory import create_optimizer, get_parameter_groups, \
     LayerDecayValueAssigner, get_is_head_flag_for_vit
 
 
 def get_args():
     parser = argparse.ArgumentParser('PaLI fine-tuning and evaluation script for image classification', add_help=False)
-    # Model parameters
-    parser.add_argument('--model_ema', action='store_true', default=False)
-    parser.add_argument('--model_ema_decay', type=float, default=0.9999, help='')
-    parser.add_argument('--model_ema_force_cpu', action='store_true', default=False, help='')
 
     # Optimizer parameters
     parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
@@ -142,26 +137,10 @@ def get_args():
 
 def main(args, ds_init):
 
-    utils.init_distributed_mode(args)
-
-    if ds_init is not None:
-        utils.create_ds_config(args)
-
     if args.task_cache_path is None:
         args.task_cache_path = args.output_dir
 
     device = torch.device(args.device)
-
-    # fix the seed for reproducibility
-    seed = args.seed + utils.get_rank()
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-
-    if utils.get_rank() == 0 and args.log_dir is not None:
-        os.makedirs(args.log_dir, exist_ok=True)
-        log_writer = utils.TensorboardLogger(log_dir=args.log_dir)
-    else:
-        log_writer = None
 
     phobert_model = None
     phobert_tokenizer = None
@@ -176,96 +155,68 @@ def main(args, ds_init):
 
     model =PaLI(device=device).to(device, non_blocking=True)
 
-    model.train()
-
-    model_ema = None
-    if args.model_ema:
-        # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
-        model_ema = ModelEma(
-            model,
-            decay=args.model_ema_decay,
-            device='cpu' if args.model_ema_force_cpu else '',
-            resume='')
-        print("Using EMA with decay = %.8f" % args.model_ema_decay)
-
-    model_without_ddp = model
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-    print("Model = %s" % str(model_without_ddp))
+    print("Model = %s" % str(model))
     print('number of params:', n_parameters)
 
-    total_batch_size = args.batch_size * args.update_freq * utils.get_world_size()
-    num_training_steps_per_epoch = len(data_loader_train) // total_batch_size
     print("LR = %.8f" % args.lr)
-    print("Batch size = %d" % total_batch_size)
+    print("Batch size = %d" % args.batch_size)
     print("Update frequent = %d" % args.update_freq)
     print("Number of training examples = %d" % len(data_loader_train))
-    print("Number of training training per epoch = %d" % num_training_steps_per_epoch)
 
-    num_layers = model_without_ddp.get_num_layers()
-    print(num_layers)
-    if args.layer_decay < 1.0:
-        lrs = list(args.layer_decay ** (num_layers + 1 - i) for i in range(num_layers + 2))
-        assigner = LayerDecayValueAssigner(lrs)
-    elif args.task_head_lr_weight > 1:
-        assigner = LayerDecayValueAssigner([1.0, args.task_head_lr_weight], scale_handler=get_is_head_flag_for_vit)
-    else:
-        assigner = None
+    # utils.auto_load_model(
+    #     args=args, model=model, model_without_ddp=model,
+    #     optimizer=optimizer)
 
-    if assigner is not None:
-        print("Assigned values = %s" % str(assigner.values))
+    for name, param in model.named_parameters():
+        if name.startswith("vit"):
+            param.requires_grad = False
+        if name.startswith("mt5"):
+            if "encoder" in name:
+                param.requires_grad = False
+
+    # Check the frozen parameters
+    with open(args.output_dir + "/Model_Architecture.txt", "w") as f:
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                print(f"Frozen parameter block: {name}")
+                f.write(f"Frozen parameter block: {name}\n")
+            else:
+                print(f"Trainable parameter block: {name}")
+                f.write(f"Trainable parameter block: {name}\n")
+
+    with open(args.output_dir + "/Paramaters.txt", "w") as f:
+        print(f"Replaced beit3 text_embed w/ PhoBERT's. Checking trainable params.\n")
+        total_params = sum(p.numel() for p in model.parameters())
+        frozen_params = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+        n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+        print(f"Total params: {total_params}\n")
+        print(f"Frozen params: {frozen_params}\n")
+        print(f"Trainable params: {n_parameters}\n")
+
+        f.write(f"Total params: {total_params}\n")
+        f.write(f"Frozen params: {frozen_params}\n")
+        f.write(f"Trainable params: {n_parameters}\n")
 
     skip_weight_decay_list = model.no_weight_decay()
 
-    if args.distributed:
-        torch.distributed.barrier()
-    if args.enable_deepspeed:
-        loss_scaler = None
-        optimizer_params = get_parameter_groups(
-            model, args.weight_decay, skip_weight_decay_list,
-            assigner.get_layer_id if assigner is not None else None,
-            assigner.get_scale if assigner is not None else None)
-        model, optimizer, _, _ = ds_init(
-            args=args, model=model, model_parameters=optimizer_params,
-            dist_init_required=not args.distributed,
-        )
-
-        print("model.gradient_accumulation_steps() = %d" % model.gradient_accumulation_steps())
-        assert model.gradient_accumulation_steps() == args.update_freq
-    else:
-        if args.distributed:
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
-            model_without_ddp = model.module
-
-        optimizer = create_optimizer(
-            args, model_without_ddp, skip_list=skip_weight_decay_list,
-            get_num_layer=assigner.get_layer_id if assigner is not None else None, 
-            get_layer_scale=assigner.get_scale if assigner is not None else None)
-        loss_scaler = NativeScaler()
-
-    lr_schedule_values = utils.cosine_scheduler(
-        args.lr, args.min_lr, args.epochs, num_training_steps_per_epoch,
-        warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
+    optimizer = create_optimizer(
+        args, model, skip_list=skip_weight_decay_list
     )
 
-    utils.auto_load_model(
-        args=args, model=model, model_without_ddp=model_without_ddp,
-        optimizer=optimizer, loss_scaler=loss_scaler, model_ema=model_ema)
-
     task_handler = PaLIHandler()
-    safe_eval_handler = copy.deepcopy(task_handler)
 
     if args.eval:
         dataset_test, data_loader_test = create_pali_datasets(
-        args,
-        is_eval = True,
-        phobert_tokenizer = phobert_tokenizer 
+            args,
+            is_eval = True,
+            phobert_tokenizer = phobert_tokenizer 
         )
         result, _ = pali_evaluate(data_loader_test, model, dataset_test.tokenizer, device, task_handler)
         pali_dump_predictions(args, result, "vivqa_pali_test")
         exit(0)
-    
-    sys.exit(0)
     
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
@@ -278,28 +229,53 @@ def main(args, ds_init):
 
         epoch_start_time = time.time()
 
-        if args.distributed:
-            data_loader_train.sampler.set_epoch(epoch)
-        if log_writer is not None:
-            log_writer.set_step(epoch * num_training_steps_per_epoch * args.update_freq)
-        train_stats = train_one_epoch(
-            model, data_loader_train, optimizer, device, task_handler, epoch, 
-            epoch * num_training_steps_per_epoch, lr_schedule_values, loss_scaler, 
-            args.clip_grad, args.update_freq, model_ema, log_writer, args.task, mixup_fn,
-        )
+        print(f"\nEpoch {epoch + 1}/{args.epochs}")
 
-        # Get epoch's train_score
-        # train_eval_stats, _ = evaluate(data_loader_train_eval, model, device, safe_eval_handler)
-        # train_stats["score"] = train_eval_stats["score"]  
+        total_loss = 0.0
+        num_batches = 0
+
+        for step, batch in enumerate(tqdm(data_loader_train, desc=f"Epoch {epoch+1}", leave=False)):
+            optimizer.zero_grad()
+
+            pixel_values = batch["pixel_values"].to(device)
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
+            qid = batch["qid"]
+
+            train_stats = task_handler.train_batch(
+                model, pixel_values, input_ids, attention_mask, labels, qid
+            )
+            
+            loss = train_stats["loss"]
+
+            loss.backward()
+            optimizer.step()
+
+            # Accumulate for epoch loss
+            total_loss += loss.item()
+            num_batches += 1
+
+            # Print running average loss every 10 steps
+            if (step + 1) % 10 == 0:
+                running_avg_loss = total_loss / num_batches
+                print(f"Epoch {epoch + 1} Step {step + 1}: loss: {running_avg_loss:.4f}, ")
+        
+        average_loss = total_loss / num_batches
+        epoch_training_time = time.time() - epoch_start_time
+        print(f"Epoch {epoch + 1} completed in {(epoch_training_time):.2f}s - Average Loss: {average_loss:.4f}")
+        
+
+
 
         if args.output_dir and args.save_ckpt:
             if (epoch + 1) % args.save_ckpt_freq == 0 or epoch + 1 == args.epochs:
                 utils.save_model(
                     args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
-                    loss_scaler=loss_scaler, epoch=epoch, model_ema=model_ema)
+                    loss_scaler=loss_scaler, epoch=epoch)
                 
         if data_loader_val is not None:
-            test_stats, task_key = evaluate(data_loader_val, model, device, task_handler)
+            test_stats, task_key = pali_evaluate(data_loader_val, model, device, task_handler)
 
             print(f"Performance of the network on the {len(data_loader_val.dataset)} val images: {test_stats[task_key]:.1f}%")
             if max_accuracy < test_stats[task_key]:
@@ -308,13 +284,11 @@ def main(args, ds_init):
                 if args.output_dir and args.save_ckpt:
                     utils.save_model(
                         args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
-                        loss_scaler=loss_scaler, epoch="best", model_ema=model_ema)
+                        loss_scaler=loss_scaler, epoch="best")
             else:
                 epochs_without_improvements += 1
 
             print(f'Max performance: {max_accuracy:.2f}%')
-            if log_writer is not None:
-                log_writer.update(acc=test_stats[task_key], head="perf", step=epoch)
             
             log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                         **{f'val_{k}': v for k, v in test_stats.items()},
@@ -328,9 +302,7 @@ def main(args, ds_init):
                          'n_parameters': n_parameters,
                          'time': time.time() - epoch_start_time}
 
-        if args.output_dir and utils.is_main_process():
-            if log_writer is not None:
-                log_writer.flush()
+        if args.output_dir:
             with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
