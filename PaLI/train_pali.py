@@ -6,6 +6,7 @@ import sys
 import json
 from pathlib import Path
 import copy
+import math
 
 from tqdm import tqdm
 
@@ -19,7 +20,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from pali_dataset import ViVQAPaLIDataset, create_pali_datasets
 from pali import PaLI
 from pali_engine_for_finetuning import PaLIHandler, pali_evaluate
-from pali_utils import pali_dump_predictions
+from pali_utils import pali_dump_predictions, pali_save_model, pali_auto_resume
 
 import utils
 from optim_factory import create_optimizer, get_parameter_groups, \
@@ -75,10 +76,14 @@ def get_args():
                         help='device to use for training / testing')
     parser.add_argument('--seed', default=0, type=int)
     parser.add_argument('--resume', default='',
-                        help='resume from checkpoint')
-    parser.add_argument('--auto_resume', action='store_true')
+                        help='resume from checkpoint') # For PaLI, only accepts resume=="best"
+    parser.add_argument('--auto_resume', action='store_true') # For PaLI, resumes the last epoch
     parser.add_argument('--no_auto_resume', action='store_false', dest='auto_resume')
     parser.set_defaults(auto_resume=True)
+
+    # Custom resume args
+    parser.add_argument('--resume_epoch', default='',
+                        help='resume from checkpoint-i where i == resume_epoch')
 
     parser.add_argument('--save_ckpt', action='store_true')
     parser.add_argument('--no_save_ckpt', action='store_false', dest='save_ckpt')
@@ -157,17 +162,29 @@ def main(args, ds_init):
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-    print("Model = %s" % str(model))
+    # print("Model = %s" % str(model))
     print('number of params:', n_parameters)
+
+    total_batch_size = args.batch_size * args.update_freq
+    num_training_steps_per_epoch = len(data_loader_train.dataset) // total_batch_size
 
     print("LR = %.8f" % args.lr)
     print("Batch size = %d" % args.batch_size)
     print("Update frequent = %d" % args.update_freq)
     print("Number of training examples = %d" % len(data_loader_train))
+    print("Number of training training per epoch = %d" % num_training_steps_per_epoch)
 
-    # utils.auto_load_model(
-    #     args=args, model=model, model_without_ddp=model,
-    #     optimizer=optimizer)
+    num_layers = model.get_num_layers()
+    if args.layer_decay < 1.0:
+        lrs = list(args.layer_decay ** (num_layers + 1 - i) for i in range(num_layers + 2))
+        assigner = LayerDecayValueAssigner(lrs)
+    elif args.task_head_lr_weight > 1:
+        assigner = LayerDecayValueAssigner([1.0, args.task_head_lr_weight], scale_handler=get_is_head_flag_for_vit)
+    else:
+        assigner = None
+
+    if assigner is not None:
+        print("Assigned values = %s" % str(assigner.values))
 
     for name, param in model.named_parameters():
         if name.startswith("vit"):
@@ -180,10 +197,10 @@ def main(args, ds_init):
     with open(args.output_dir + "/Model_Architecture.txt", "w") as f:
         for name, param in model.named_parameters():
             if not param.requires_grad:
-                print(f"Frozen parameter block: {name}")
+                # print(f"Frozen parameter block: {name}")
                 f.write(f"Frozen parameter block: {name}\n")
             else:
-                print(f"Trainable parameter block: {name}")
+                # print(f"Trainable parameter block: {name}")
                 f.write(f"Trainable parameter block: {name}\n")
 
     with open(args.output_dir + "/Paramaters.txt", "w") as f:
@@ -208,6 +225,19 @@ def main(args, ds_init):
 
     task_handler = PaLIHandler()
 
+    lr_schedule_values = utils.cosine_scheduler(
+        args.lr, args.min_lr, args.epochs, num_training_steps_per_epoch,
+        warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
+    )
+
+
+    model, optimizer, args.start_epoch = pali_auto_resume(
+        args,
+        model=model,
+        optimizer=optimizer,
+        device=device
+    )
+
     if args.eval:
         dataset_test, data_loader_test = create_pali_datasets(
             args,
@@ -229,12 +259,16 @@ def main(args, ds_init):
 
         epoch_start_time = time.time()
 
-        print(f"\nEpoch {epoch + 1}/{args.epochs}")
+        print(f"\nEpoch {epoch}/{args.epochs}")
 
         total_loss = 0.0
+        total_score = 0.0
         num_batches = 0
 
-        for step, batch in enumerate(tqdm(data_loader_train, desc=f"Epoch {epoch+1}", leave=False)):
+        min_lr = 10.
+        max_lr = 0.
+
+        for step, batch in enumerate(tqdm(data_loader_train, desc=f"Epoch {epoch}", leave=False)):
             optimizer.zero_grad()
 
             pixel_values = batch["pixel_values"].to(device)
@@ -243,64 +277,81 @@ def main(args, ds_init):
             labels = batch["labels"].to(device)
             qid = batch["qid"]
 
+            data_iter_step = epoch * len(data_loader_train) + step
+            step_in_update  = data_iter_step // args.update_freq
+            start_step = epoch * num_training_steps_per_epoch
+            global_step = start_step + step_in_update
+
+            if lr_schedule_values is not None and data_iter_step % args.update_freq == 0:
+                for i, param_group in enumerate(optimizer.param_groups):
+                    if lr_schedule_values is not None:
+                        param_group["lr"] = lr_schedule_values[global_step] * param_group.get("lr_scale", 1.0)
+
             train_stats = task_handler.train_batch(
-                model, pixel_values, input_ids, attention_mask, labels, qid
+                model, dataset_train.tokenizer, pixel_values, input_ids, attention_mask, labels, qid
             )
             
             loss = train_stats["loss"]
+            batch_score = train_stats["score"]
+
+            if not math.isfinite(loss.item()):
+                print("Loss is {}, stopping training".format(loss.item()))
+                sys.exit(1)
 
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             # Accumulate for epoch loss
             total_loss += loss.item()
+            total_score += batch_score
             num_batches += 1
+
+            for group in optimizer.param_groups:
+                min_lr = min(min_lr, group["lr"])
+                max_lr = max(max_lr, group["lr"])
 
             # Print running average loss every 10 steps
             if (step + 1) % 10 == 0:
                 running_avg_loss = total_loss / num_batches
-                print(f"Epoch {epoch + 1} Step {step + 1}: loss: {running_avg_loss:.4f}, ")
+                running_avg_score = total_score / num_batches
+                print(f"Epoch {epoch} Step {step + 1}: loss: {running_avg_loss:.4f}, score {running_avg_score:.4f}, " +
+                      f"min_lr: {min_lr:.6f}, max_lr: {max_lr:.6f}")
         
         average_loss = total_loss / num_batches
+        average_score = total_score / num_batches
         epoch_training_time = time.time() - epoch_start_time
-        print(f"Epoch {epoch + 1} completed in {(epoch_training_time):.2f}s - Average Loss: {average_loss:.4f}")
+        print(f"Epoch {epoch} completed in {(epoch_training_time):.2f}s - Average Loss: {average_loss:.4f} - Average Score: {average_score:.4f}")
         
-
-
-
         if args.output_dir and args.save_ckpt:
             if (epoch + 1) % args.save_ckpt_freq == 0 or epoch + 1 == args.epochs:
-                utils.save_model(
-                    args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
-                    loss_scaler=loss_scaler, epoch=epoch)
+                pali_save_model(args=args, epoch=epoch, model=model, optimizer=optimizer)
                 
         if data_loader_val is not None:
-            test_stats, task_key = pali_evaluate(data_loader_val, model, device, task_handler)
+            test_stats = pali_evaluate(data_loader_val, model, dataset_val.tokenizer, device, task_handler)
 
-            print(f"Performance of the network on the {len(data_loader_val.dataset)} val images: {test_stats[task_key]:.1f}%")
-            if max_accuracy < test_stats[task_key]:
-                max_accuracy = test_stats[task_key]
+            print(f"Performance of the network on the {len(data_loader_val)} val images: {test_stats['score']:.1f}%")
+            if max_accuracy < test_stats['score']:
+                max_accuracy = test_stats['score']
                 epochs_without_improvements = 0 # Reset patience
                 if args.output_dir and args.save_ckpt:
-                    utils.save_model(
-                        args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
-                        loss_scaler=loss_scaler, epoch="best")
+                    pali_save_model(args=args, epoch=f"best-{epoch}", model=model, optimizer=optimizer)
             else:
                 epochs_without_improvements += 1
 
             print(f'Max performance: {max_accuracy:.2f}%')
             
-            log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                        **{f'val_{k}': v for k, v in test_stats.items()},
+            log_stats = {**{f'train_{k}': v.item() for k, v in train_stats.items() if k != "prediction"},
+                        **{f'val_{k}': v for k, v in test_stats.items() if k != "prediction"},
                         'epoch': epoch,
                         'n_parameters': n_parameters,
-                        'time': time.time() - epoch_start_time}
+                        'time': epoch_training_time}
         else:
-            log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                         **{f'test_{k}': v for k, v in test_stats.items()},
+            log_stats = {**{f'train_{k}': v.item() for k, v in train_stats.items() if k != "prediction"},
+                         **{f'test_{k}': v for k, v in test_stats.items() if k != "prediction"},
                          'epoch': epoch,
                          'n_parameters': n_parameters,
-                         'time': time.time() - epoch_start_time}
+                         'time': epoch_training_time}
 
         if args.output_dir:
             with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
