@@ -29,7 +29,7 @@ class ViVQAPaLIDataset(torch.utils.data.Dataset):
 
         # self.image_processor = ViTImageProcessor.from_pretrained(vit_model_name)
 
-        if split == "train" or split == "val":
+        if split == "train":
             self.image_processor = build_vqa_transform(is_train=True)
         else:
             self.image_processor = build_vqa_transform(is_train=False)

@@ -57,6 +57,9 @@ def get_args():
                         help='epochs to warmup LR, if scheduler supports')
     parser.add_argument('--warmup_steps', type=int, default=-1, metavar='N',
                         help='num of steps to warmup LR, will overload warmup_epochs if set > 0')
+    
+    parser.add_argument('--lr_sched_type', type=str, default='linear', choices=['cos', 'linear'],
+                        help='Learning rate scheduler type (default: linear)')
 
     parser.add_argument('--batch_size', default=64, type=int)
     parser.add_argument('--eval_batch_size', default=None, type=int)
@@ -188,12 +191,12 @@ def main(args, ds_init):
     if assigner is not None:
         print("Assigned values = %s" % str(assigner.values))
 
-    for name, param in model.named_parameters():
-        if name.startswith("vit"):
-            param.requires_grad = False
-        if name.startswith("mt5"):
-            if "encoder" in name:
-                param.requires_grad = False
+    # for name, param in model.named_parameters():
+    #     if name.startswith("vit"):
+    #         param.requires_grad = False
+    #     if name.startswith("mt5"):
+    #         if "encoder" in name:
+    #             param.requires_grad = False
 
     # Check the frozen parameters
     with open(args.output_dir + "/Model_Architecture.txt", "w") as f:
@@ -229,7 +232,8 @@ def main(args, ds_init):
 
     lr_schedule_values = utils.cosine_scheduler(
         args.lr, args.min_lr, args.epochs, num_training_steps_per_epoch,
-        warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps, sched_type = "linear"
+        warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
+        sched_type=args.lr_sched_type,
     )
 
     model, optimizer, args.start_epoch = pali_auto_resume(
