@@ -36,7 +36,7 @@ class PaLIHandler(object):
             pixel_values=pixel_values,
             input_ids=input_ids,
             attention_mask=attention_mask,
-            max_length=3,
+            max_length=4,
             num_beams=1, # increase for better generation at cost of speed
         )
 
@@ -73,7 +73,7 @@ class PaLIHandler(object):
             pixel_values=pixel_values,
             input_ids=input_ids,
             attention_mask=attention_mask,
-            max_length=3,
+            max_length=4,
             num_beams=1, # increase for better generation at cost of speed
         )
 
@@ -104,12 +104,14 @@ class PaLIHandler(object):
             return {
                 "prediction": self.predictions,
                 "score": self.metric_logger.score.global_avg,
-                "meters": {k: meter.global_avg for k, meter in self.metric_logger.meters.items()},
+                # "meters": {k: meter.global_avg for k, meter in self.metric_logger.meters.items()},
+                "loss": self.metric_logger.loss.global_avg
             }
         else:
             return {
                 "score": self.metric_logger.score.global_avg,
-                "meters": {k: meter.global_avg for k, meter in self.metric_logger.meters.items()},
+                # "meters": {k: meter.global_avg for k, meter in self.metric_logger.meters.items()},
+                "loss": self.metric_logger.loss.global_avg
             }
 
 @torch.no_grad()

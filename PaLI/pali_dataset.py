@@ -6,9 +6,14 @@ import sys
 from PIL import Image
 from transformers import MT5Tokenizer, ViTImageProcessor
 from torch.utils.data import DataLoader
+from torchvision import transforms
+from torchvision.transforms import InterpolationMode
+
+from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import utils
+from randaug import RandomAugment
 
 class ViVQAPaLIDataset(torch.utils.data.Dataset):
     def __init__(self,
@@ -22,7 +27,12 @@ class ViVQAPaLIDataset(torch.utils.data.Dataset):
 
         self.image_dir = image_dir
 
-        self.image_processor = ViTImageProcessor.from_pretrained(vit_model_name)
+        # self.image_processor = ViTImageProcessor.from_pretrained(vit_model_name)
+
+        if split == "train" or split == "val":
+            self.image_processor = build_vqa_transform(is_train=True)
+        else:
+            self.image_processor = build_vqa_transform(is_train=False)
 
         if args.phobert and phobert_tokenizer is not None:
             self.tokenizer = phobert_tokenizer
@@ -30,7 +40,7 @@ class ViVQAPaLIDataset(torch.utils.data.Dataset):
             self.tokenizer = MT5Tokenizer.from_pretrained(mt5_model_name)
 
         self.input_max_length = 50
-        self.label_max_length = 3
+        self.label_max_length = 4
         self.split = split
 
     def __getitem__(self, idx):
@@ -40,7 +50,11 @@ class ViVQAPaLIDataset(torch.utils.data.Dataset):
         image_path = self.image_dir + f"/{image_id}.jpg"
         image = Image.open(image_path).convert("RGB")
 
-        pixel_values = self.image_processor(images=image, return_tensors="pt").pixel_values.squeeze(0)
+        # pixel_values = self.image_processor(images=image, return_tensors="pt").pixel_values.squeeze(0)
+
+        image = self.image_processor(image)  # This returns a tensor normalized for ViT
+
+        pixel_values = image  # Already a tensor, shape [3, H, W], no need for .squeeze()
 
         tokenized_text = self.tokenizer(self.data[idx]["question"], return_tensors="pt",
                                         padding="max_length", max_length=self.input_max_length, truncation=True)
@@ -74,7 +88,7 @@ def create_pali_dataloader(dataset, is_train, batch_size, num_workers, pin_mem, 
         num_workers=num_workers,
         pin_memory=pin_mem,
         drop_last=is_train,
-        collate_fn=utils.merge_batch_tensors_by_dict_key, # TODO: Reivew this params in case of bug
+        collate_fn=utils.merge_batch_tensors_by_dict_key,
     )
 
 def create_pali_dataset_by_split(args, split, is_train=True, phobert_tokenizer=None):
@@ -120,3 +134,30 @@ def create_pali_datasets(args, is_eval=False, phobert_tokenizer=None):
             
 
 
+def build_vqa_transform(is_train=True):
+    if is_train:
+        t = [
+            transforms.RandomResizedCrop(224, scale=(0.5, 1.0), interpolation=InterpolationMode.BICUBIC),
+            transforms.RandomHorizontalFlip(),
+        ]
+        t.append(
+                RandomAugment(
+                    2, 7, isPIL=True,
+                    augs=[
+                        'Identity','AutoContrast','Equalize','Brightness','Sharpness',
+                        'ShearX', 'ShearY', 'TranslateX', 'TranslateY', 'Rotate',
+                    ]
+                )
+            )
+        t += [
+            transforms.ToTensor(),
+            transforms.Normalize(mean=IMAGENET_INCEPTION_MEAN, std=IMAGENET_INCEPTION_STD),
+        ]
+    else:
+        t = [
+            transforms.Resize((224, 224), interpolation=InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=IMAGENET_INCEPTION_MEAN, std=IMAGENET_INCEPTION_STD)
+        ]
+
+    return transforms.Compose(t)

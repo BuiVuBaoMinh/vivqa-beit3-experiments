@@ -914,14 +914,18 @@ def coco_caption_eval(gt_dir, results_file, split):
     return res_dict
 
 # Custom utils for Vietnamese Integration experiments
-def get_max_accuracy_and_no_improvement_streak(output_dir):
+def get_best_meters_and_no_improvement_streak(output_dir, early_stopping_metric=None):
     log_path = os.path.join(output_dir, "log.txt")
+    
     max_accuracy = 0.0
+    min_val_loss = float('inf')
+
     val_scores = []
+    val_losses = []
 
     if not os.path.exists(log_path):
         print(f"Log file not found at: {log_path}")
-        return max_accuracy, 0
+        return max_accuracy, min_val_loss, 0
 
     with open(log_path, 'r', encoding='utf-8') as f:
         for line in f:
@@ -934,15 +938,30 @@ def get_max_accuracy_and_no_improvement_streak(output_dir):
                     val = entry['val_score']
                     val_scores.append(val)
                     max_accuracy = max(max_accuracy, val)
+                if 'val_loss' in entry:
+                    loss = entry['val_loss']
+                    val_losses.append(loss)
+                    min_val_loss = min(min_val_loss, loss)
             except json.JSONDecodeError:
                 continue  # skip bad JSON lines
 
-    # Now calculate the streak of epochs from the end with no improvement
+    if early_stopping_metric == "val_score":
+        metric_list = val_scores
+        best_value = max_accuracy
+        comparison = lambda x: x < best_value
+    elif early_stopping_metric == "val_loss":
+        metric_list = val_losses
+        best_value = min_val_loss
+        comparison = lambda x: x > best_value
+    else:
+        raise ValueError("Invalid early_stopping_metric. Use 'val_score' or 'val_loss'.")
+
+    # Calculate epochs without improvement
     epochs_without_improvement = 0
-    for score in reversed(val_scores):
-        if score < max_accuracy:
+    for val in reversed(metric_list):
+        if comparison(val):
             epochs_without_improvement += 1
         else:
-            break  # last improvement was here, stop counting
+            break
 
-    return max_accuracy, epochs_without_improvement
+    return max_accuracy, min_val_loss, epochs_without_improvement

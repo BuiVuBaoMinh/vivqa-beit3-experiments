@@ -117,6 +117,8 @@ def get_args():
                         help="Specify whether replacing the phobert's tokenizer and embedding layers or not")
     parser.add_argument('--patience', type=int, default=5,
                         help='Number of training epochs without improvements.')
+    parser.add_argument('--early_stopping', type=str, default='val_score',
+                        help="Determine the early stopping criteria. Supports val_score and val_loss")
 
     # deepspeed parameters
     parser.add_argument('--enable_deepspeed', action='store_true', default=False)
@@ -227,9 +229,8 @@ def main(args, ds_init):
 
     lr_schedule_values = utils.cosine_scheduler(
         args.lr, args.min_lr, args.epochs, num_training_steps_per_epoch,
-        warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
+        warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps, sched_type = "linear"
     )
-
 
     model, optimizer, args.start_epoch = pali_auto_resume(
         args,
@@ -244,17 +245,24 @@ def main(args, ds_init):
             is_eval = True,
             phobert_tokenizer = phobert_tokenizer 
         )
-        result, _ = pali_evaluate(data_loader_test, model, dataset_test.tokenizer, device, task_handler)
-        pali_dump_predictions(args, result, "vivqa_pali_test")
+        result = pali_evaluate(data_loader_test, model, dataset_test.tokenizer, device, task_handler)
+        pali_dump_predictions(args, result["prediction"], "vivqa_pali_test")
         exit(0)
     
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
 
-    max_accuracy, epochs_without_improvements = utils.get_max_accuracy_and_no_improvement_streak(args.output_dir)
+    max_accuracy, min_val_loss, epochs_without_improvements = utils.get_best_meters_and_no_improvement_streak(
+        args.output_dir,
+        early_stopping_metric=args.early_stopping
+    )
     print(f"This section's initial max_accuracy: {max_accuracy}")
+    print(f"This section's initial min_val_loss: {min_val_loss}")
+    print(f"Using early stopping: {args.early_stopping} with patience = {args.patience}")
     print(f"This section's initial epochs_without_improvements: {epochs_without_improvements}")
     patience = args.patience
+
+    max_accuracy_stop = max_accuracy # Used for early stopping logic
     for epoch in range(args.start_epoch, args.epochs):
 
         epoch_start_time = time.time()
@@ -330,18 +338,32 @@ def main(args, ds_init):
         if data_loader_val is not None:
             test_stats = pali_evaluate(data_loader_val, model, dataset_val.tokenizer, device, task_handler)
 
-            print(f"Performance of the network on the {len(data_loader_val)} val images: {test_stats['score']:.1f}%")
+            print(f"Performance of the network on the {len(data_loader_val)} val batches: {test_stats['score']:.1f}%")
+
             if max_accuracy < test_stats['score']:
                 max_accuracy = test_stats['score']
-                epochs_without_improvements = 0 # Reset patience
                 if args.output_dir and args.save_ckpt:
                     pali_save_model(args=args, epoch=f"best-{epoch}", model=model, optimizer=optimizer)
-            else:
-                epochs_without_improvements += 1
+                
+            if args.early_stopping == "val_score":
+                if max_accuracy_stop < test_stats['score']:
+                    max_accuracy_stop = test_stats['score']
+                    epochs_without_improvements = 0 # Reset patience
+                else:
+                    epochs_without_improvements += 1
+            elif args.early_stopping == "val_loss":
+                if min_val_loss > test_stats['loss']:
+                    min_val_loss = test_stats['loss']
+                    epochs_without_improvements = 0 # Reset patience
+                else:
+                    epochs_without_improvements += 1
 
             print(f'Max performance: {max_accuracy:.2f}%')
+            print(f'Min loss: {min_val_loss}')
             
             log_stats = {**{f'train_{k}': v.item() for k, v in train_stats.items() if k != "prediction"},
+                        'train_min_lr': min_lr,
+                        'train_max_lr': max_lr,
                         **{f'val_{k}': v for k, v in test_stats.items() if k != "prediction"},
                         'epoch': epoch,
                         'n_parameters': n_parameters,
@@ -349,6 +371,8 @@ def main(args, ds_init):
         else:
             log_stats = {**{f'train_{k}': v.item() for k, v in train_stats.items() if k != "prediction"},
                          **{f'test_{k}': v for k, v in test_stats.items() if k != "prediction"},
+                         'train_min_lr': min_lr,
+                         'train_max_lr': max_lr,
                          'epoch': epoch,
                          'n_parameters': n_parameters,
                          'time': epoch_training_time}
@@ -366,52 +390,3 @@ if __name__ == "__main__":
     if opts.output_dir:
         Path(opts.output_dir).mkdir(parents=True, exist_ok=True)
     main(opts, ds_init)
-
-BATCH_SIZE = 1
-LEARNING_RATE = 2e-15
-EPOCHS = 50
-
-train_dataset = ViVQAPaLIDataset(
-    json_path="/home/lenovo/exp1/data/vivqa/vqa/train_en.json",
-    image_dir="/home/lenovo/exp1/data/vivqa/images/train",
-)
-
-test_dataset = ViVQAPaLIDataset(
-    json_path="/home/lenovo/exp1/data/vivqa/vqa/test_en.json",
-    image_dir="/home/lenovo/exp1/data/vivqa/images/test",
-)
-
-train_data_loader = DataLoader(
-    dataset=train_dataset,
-    batch_size=BATCH_SIZE,
-)
-
-test_data_loader = DataLoader(
-    dataset=test_dataset,
-    batch_size=BATCH_SIZE,
-)
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model =PaLI(device=device).to(device, non_blocking=True)
-
-model.train()
-
-optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
-
-for epoch in range(EPOCHS):
-    print(f"training epoch {epoch}")
-    for batch in train_data_loader:
-        optimizer.zero_grad()
-
-        pixel_values = batch["pixel_values"].to(device)
-        input_ids = batch["input_ids"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
-        labels = batch["labels"].to(device)
-
-        output = model(pixel_values, input_ids, attention_mask, labels)
-        loss = output.loss
-        print(f"Loss: {loss}")
-
-        loss.backward()
-        optimizer.step()
-        
