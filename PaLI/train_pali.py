@@ -84,10 +84,6 @@ def get_args():
     parser.add_argument('--no_auto_resume', action='store_false', dest='auto_resume')
     parser.set_defaults(auto_resume=True)
 
-    # Custom resume args
-    parser.add_argument('--resume_epoch', default='',
-                        help='resume from checkpoint-i where i == resume_epoch')
-
     parser.add_argument('--save_ckpt', action='store_true')
     parser.add_argument('--no_save_ckpt', action='store_false', dest='save_ckpt')
     parser.set_defaults(save_ckpt=True)
@@ -104,14 +100,6 @@ def get_args():
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem')
     parser.set_defaults(pin_mem=True)
 
-    # distributed training parameters
-    parser.add_argument('--world_size', default=1, type=int,
-                        help='number of distributed processes')
-    parser.add_argument('--local_rank', default=-1, type=int)
-    parser.add_argument('--dist_on_itp', action='store_true')
-    parser.add_argument('--dist_url', default='env://',
-                        help='url used to set up distributed training')
-
     # parameter for dump predictions (VQA, COCO captioning, NoCaps)
     parser.add_argument('--task_cache_path', default=None, type=str)
 
@@ -123,25 +111,14 @@ def get_args():
     parser.add_argument('--early_stopping', type=str, default='val_score',
                         help="Determine the early stopping criteria. Supports val_score and val_loss")
 
-    # deepspeed parameters
-    parser.add_argument('--enable_deepspeed', action='store_true', default=False)
-    parser.add_argument('--initial_scale_power', type=int, default=16)
-    parser.add_argument('--zero_stage', default=0, type=int,
-                        help='ZeRO optimizer stage (default: 0)')
+    # Custom resume args
+    parser.add_argument('--no_resume_optimizer', action="store_true", default=False,
+                        help="This parameter prevents auto loading optimizer from checkpoint")
+    
 
     known_args, _ = parser.parse_known_args()
 
-    if known_args.enable_deepspeed:
-        try:
-            import deepspeed
-            from deepspeed import DeepSpeedConfig
-            parser = deepspeed.add_config_arguments(parser)
-            ds_init = deepspeed.initialize
-        except:
-            print("Please 'pip install deepspeed==0.4.0'")
-            exit(0)
-    else:
-        ds_init = None
+    ds_init = None
     
     return parser.parse_args(), ds_init
 
@@ -209,7 +186,7 @@ def main(args, ds_init):
                 f.write(f"Trainable parameter block: {name}\n")
 
     with open(args.output_dir + "/Paramaters.txt", "w") as f:
-        print(f"Replaced beit3 text_embed w/ PhoBERT's. Checking trainable params.\n")
+        print(f"Checking trainable params.\n")
         total_params = sum(p.numel() for p in model.parameters())
         frozen_params = sum(p.numel() for p in model.parameters() if not p.requires_grad)
         n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)

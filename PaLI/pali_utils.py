@@ -4,6 +4,7 @@ import os
 import json
 from pathlib import Path
 import re
+import glob
 
 from torchmetrics import Metric
 
@@ -130,7 +131,7 @@ def pali_save_model(
 
 def pali_auto_resume(args, model, optimizer=None, device='cuda'):
     """
-    Automatically resume the latest checkpoint if available and args.auto_resume is True.
+    Automatically resume the latest checkpoint if available.
 
     Args:
         args: .
@@ -143,12 +144,17 @@ def pali_auto_resume(args, model, optimizer=None, device='cuda'):
         optimizer: Optimizer with loaded state if provided.
         epoch (int): The epoch to resume from.
 
-    Sample usage (in case I forget):
+    Sample usage:
     ```
     model = PaLI(...)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
-    model, optimizer, start_epoch = pali_auto_resume(args, model, optimizer, device=args.device)
+    model, optimizer, args.start_epoch = pali_auto_resume(
+        args,
+        model=model,
+        optimizer=optimizer,
+        device=device
+    )
     ```
     """
     checkpoint_path = None
@@ -167,16 +173,15 @@ def pali_auto_resume(args, model, optimizer=None, device='cuda'):
             return int(match.group(1)) if match else -1
 
         best_checkpoint = max(best_checkpoints, key=extract_epoch)
-        checkpoint_path = best_checkpoint
+        checkpoint_path = os.path.join(ckpt_dir, best_checkpoint.name)
+        print(checkpoint_path)
+        print(checkpoint_path is not None)
+        print(os.path.isfile(checkpoint_path))
+        print(checkpoint_path is not None and os.path.isfile(checkpoint_path))
 
-    # Case 2: Resume from specific epoch
-    elif hasattr(args, 'resume_epoch') and args.resume_epoch is not None:
-        checkpoint_path = os.path.join(args.output_dir, f'checkpoint-{args.resume_epoch}')
-
-    # Case 3: Auto resume from latest epoch
-    elif getattr(args, 'auto_resume', False):
-        import glob
-        checkpoint_files = glob.glob(os.path.join(args.output_dir, 'checkpoint-*'))
+    # Case 2: Auto resume from latest epoch
+    if hasattr(args, 'resume') and args.resume == 'latest':
+        checkpoint_files = glob.glob(os.path.join(ckpt_dir, 'checkpoint-*'))
         latest_epoch = -1
         for ckpt in checkpoint_files:
             ckpt_name = os.path.basename(ckpt)
@@ -197,11 +202,11 @@ def pali_auto_resume(args, model, optimizer=None, device='cuda'):
         checkpoint = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(checkpoint['model'])
 
-        if optimizer is not None and 'optimizer' in checkpoint:
+        if optimizer is not None and 'optimizer' in checkpoint and not args.no_resume_optimizer:
             optimizer.load_state_dict(checkpoint['optimizer'])
 
         # Attempt to extract epoch from file name
-        match = re.search(r'checkpoint-(?:best-)?(\d+)', checkpoint_path.name)
+        match = re.search(r'checkpoint-(?:best-)?(\d+)', checkpoint_path)
         if match:
             start_epoch = int(match.group(1)) + 1  # resume from next epoch
         else:
