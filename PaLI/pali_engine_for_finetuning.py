@@ -59,7 +59,7 @@ class PaLIHandler(object):
         self.metric_logger = metric_logger
         # self.label2ans = data_loader.dataset.label2ans
 
-    def eval_batch(self, model, tokenizer, pixel_values, input_ids, attention_mask, labels, qid=None):
+    def eval_batch(self, model, tokenizer, pixel_values, input_ids, attention_mask, labels, qid=None, num_beams=1):
         outputs = model(
             pixel_values = pixel_values,
             input_ids = input_ids,
@@ -115,7 +115,7 @@ class PaLIHandler(object):
             }
 
 @torch.no_grad()
-def pali_evaluate(data_loader, model, tokenizer, device, handler: PaLIHandler, return_preds: bool = True):
+def pali_evaluate(data_loader, model, tokenizer, device, handler: PaLIHandler, return_preds: bool = True, num_beams=1):
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Test:'
 
@@ -137,7 +137,8 @@ def pali_evaluate(data_loader, model, tokenizer, device, handler: PaLIHandler, r
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
-            qid=qid
+            qid=qid,
+            num_beams=num_beams
         )
 
     return handler.after_eval(return_preds = return_preds)

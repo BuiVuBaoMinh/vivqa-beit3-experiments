@@ -174,10 +174,7 @@ def pali_auto_resume(args, model, optimizer=None, device='cuda'):
 
         best_checkpoint = max(best_checkpoints, key=extract_epoch)
         checkpoint_path = os.path.join(ckpt_dir, best_checkpoint.name)
-        print(checkpoint_path)
-        print(checkpoint_path is not None)
-        print(os.path.isfile(checkpoint_path))
-        print(checkpoint_path is not None and os.path.isfile(checkpoint_path))
+
 
     # Case 2: Auto resume from latest epoch
     if hasattr(args, 'resume') and args.resume == 'latest':

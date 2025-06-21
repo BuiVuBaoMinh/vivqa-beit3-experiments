@@ -110,6 +110,8 @@ def get_args():
                         help='Number of training epochs without improvements.')
     parser.add_argument('--early_stopping', type=str, default='val_score',
                         help="Determine the early stopping criteria. Supports val_score and val_loss")
+    parser.add_argument('--eval_num_beams', type=int, default=1,
+                        help="Number of beam used for beam search in PaLI.generate()")
 
     # Custom resume args
     parser.add_argument('--no_resume_optimizer', action="store_true", default=False,
@@ -226,7 +228,14 @@ def main(args, ds_init):
             is_eval = True,
             phobert_tokenizer = phobert_tokenizer 
         )
-        result = pali_evaluate(data_loader_test, model, dataset_test.tokenizer, device, task_handler)
+        result = pali_evaluate(
+            data_loader_test,
+            model,
+            dataset_test.tokenizer,
+            device, task_handler,
+            True,
+            args.eval_num_beams
+        )
         pali_dump_predictions(args, result["prediction"], "vivqa_pali_test")
         exit(0)
     
