@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import timm
 
-from transformers import MT5ForConditionalGeneration, AutoTokenizer
+from transformers import MT5ForConditionalGeneration
 
 import torch
 import torch.nn as nn
@@ -50,8 +50,6 @@ class PaLI(nn.Module):
         return output
 
     def generate(self, pixel_values, input_ids, attention_mask, labels=None, **generate_kwargs):
-
-        # TODO: Check the output of this function
         vision_embeds = self.vit(pixel_values).last_hidden_state[:, 1:, :] # get unpooled output from ViT, according to paper.
         vision_embeds = self.vision_proj(vision_embeds)
         image_attention_masks = torch.ones(vision_embeds.shape[:2], dtype=torch.long, device=self.device)

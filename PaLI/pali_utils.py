@@ -8,8 +8,6 @@ import glob
 
 from torchmetrics import Metric
 
-from utils import get_rank, get_world_size
-
 class PaLIF1Score(Metric):
     def __init__(self, dist_sync_on_step=False):
         super().__init__(dist_sync_on_step=dist_sync_on_step)
@@ -196,7 +194,7 @@ def pali_auto_resume(args, model, optimizer=None, device='cuda'):
 
     if checkpoint_path is not None and os.path.isfile(checkpoint_path):
         print(f"✅ Resuming from checkpoint: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['model'])
 
         if optimizer is not None and 'optimizer' in checkpoint and not args.no_resume_optimizer:

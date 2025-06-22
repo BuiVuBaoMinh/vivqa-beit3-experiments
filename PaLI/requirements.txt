@@ -1,0 +1,8 @@
+tqdm
+transformers
+timm==0.4.12
+torchmetrics==0.7.3
+tensorboardX
+opencv-python
+Pillow
+numpy
