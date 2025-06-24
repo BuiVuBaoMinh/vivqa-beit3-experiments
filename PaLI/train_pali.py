@@ -18,9 +18,10 @@ from transformers import AutoModel, AutoTokenizer, PhobertTokenizer
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from pali_dataset import ViVQAPaLIDataset, create_pali_datasets
-from pali import PaLI
+from pali import PaLI, PaLI_PhoBERT
 from pali_engine_for_finetuning import PaLIHandler, pali_evaluate
 from pali_utils import pali_dump_predictions, pali_save_model, pali_auto_resume
+from pali_phobert import create_pali_phobert_model
 
 import utils
 from optim_factory import create_optimizer, get_parameter_groups, \
@@ -58,7 +59,7 @@ def get_args():
     parser.add_argument('--warmup_steps', type=int, default=-1, metavar='N',
                         help='num of steps to warmup LR, will overload warmup_epochs if set > 0')
     
-    parser.add_argument('--lr_sched_type', type=str, default='linear', choices=['cos', 'linear'],
+    parser.add_argument('--lr_sched_type', type=str, default='linear', choices=['cos', 'linear', 'none'],
                         help='Learning rate scheduler type (default: linear)')
 
     parser.add_argument('--batch_size', default=64, type=int)
@@ -73,13 +74,10 @@ def get_args():
 
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
-    parser.add_argument('--log_dir', default=None,
-                        help='path where to tensorboard log')
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
-    parser.add_argument('--seed', default=0, type=int)
     parser.add_argument('--resume', default='',
-                        help='resume from checkpoint') # For PaLI, only accepts resume=="best"
+                        help='resume from checkpoint')
     parser.add_argument('--auto_resume', action='store_true') # For PaLI, resumes the last epoch
     parser.add_argument('--no_auto_resume', action='store_false', dest='auto_resume')
     parser.set_defaults(auto_resume=True)
@@ -131,23 +129,26 @@ def main(args, ds_init):
 
     device = torch.device(args.device)
 
-    phobert_model = None
     phobert_tokenizer = None
+
     if args.phobert:
-        phobert_tokenizer = AutoTokenizer.from_pretrained("vinai/phobert-base-v2") # using PhoBERT tokenizer
-        phobert_model = AutoModel.from_pretrained("vinai/phobert-base-v2") # Get word_embedding from phobert to replace text_embed
+        # model, phobert_tokenizer, _ = create_pali_phobert_model(
+        #     device=device
+        # )
+        model = PaLI_PhoBERT(device=device).to(device)
+        phobert_tokenizer = AutoTokenizer.from_pretrained("vinai/phobert-base-v2")
+    else:
+        model = PaLI(device=device).to(device, non_blocking=True)
 
     dataset_train, data_loader_train, dataset_val, data_loader_val = create_pali_datasets(
         args,
         phobert_tokenizer=phobert_tokenizer
     )
 
-    model =PaLI(device=device).to(device, non_blocking=True)
-
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     # print("Model = %s" % str(model))
-    print('number of params:', n_parameters)
+    print('Number of params:', n_parameters)
 
     total_batch_size = args.batch_size * args.update_freq
     num_training_steps_per_epoch = len(data_loader_train.dataset) // total_batch_size
@@ -171,11 +172,13 @@ def main(args, ds_init):
         print("Assigned values = %s" % str(assigner.values))
 
     # for name, param in model.named_parameters():
-    #     if name.startswith("vit"):
-    #         param.requires_grad = False
-    #     if name.startswith("mt5"):
-    #         if "encoder" in name:
-    #             param.requires_grad = False
+        # if name.startswith("vit"):
+        #     param.requires_grad = False
+        # if name.startswith("mt5"):
+        #     # if "encoder" or "decoder" in name:
+        #     #     param.requires_grad = False
+        #     if "shared" in name:
+        #         param.requires_grad = False
 
     # Check the frozen parameters
     with open(args.output_dir + "/Model_Architecture.txt", "w") as f:
@@ -209,11 +212,14 @@ def main(args, ds_init):
 
     task_handler = PaLIHandler()
 
-    lr_schedule_values = utils.cosine_scheduler(
-        args.lr, args.min_lr, args.epochs, num_training_steps_per_epoch,
-        warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
-        sched_type=args.lr_sched_type,
-    )
+    if (args.lr_sched_type != 'none'):
+        lr_schedule_values = utils.cosine_scheduler(
+            args.lr, args.min_lr, args.epochs, num_training_steps_per_epoch,
+            warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
+            sched_type=args.lr_sched_type,
+        )
+    else:
+        lr_schedule_values = None
 
     model, optimizer, args.start_epoch = pali_auto_resume(
         args,
@@ -302,7 +308,7 @@ def main(args, ds_init):
 
             # Accumulate for epoch loss
             total_loss += loss.item()
-            total_score += batch_score
+            total_score += batch_score.item()
             num_batches += 1
 
             for group in optimizer.param_groups:
@@ -320,7 +326,7 @@ def main(args, ds_init):
         average_score = total_score / num_batches
         epoch_training_time = time.time() - epoch_start_time
         print(f"Epoch {epoch} completed in {(epoch_training_time):.2f}s - Average Loss: {average_loss:.4f} - Average Score: {average_score:.4f}")
-        
+
         if args.output_dir and args.save_ckpt:
             if (epoch + 1) % args.save_ckpt_freq == 0 or epoch + 1 == args.epochs:
                 pali_save_model(args=args, epoch=epoch, model=model, optimizer=optimizer)
@@ -341,31 +347,39 @@ def main(args, ds_init):
                     epochs_without_improvements = 0 # Reset patience
                 else:
                     epochs_without_improvements += 1
+                # Update min val loss, only for statistic
+                if min_val_loss > test_stats['loss']:
+                    min_val_loss = test_stats['loss']
             elif args.early_stopping == "val_loss":
                 if min_val_loss > test_stats['loss']:
                     min_val_loss = test_stats['loss']
                     epochs_without_improvements = 0 # Reset patience
                 else:
                     epochs_without_improvements += 1
+                # Update max val score, only for statistc
+                if max_accuracy_stop < test_stats['score']:
+                    max_accuracy_stop = test_stats['score']
 
-            print(f'Max performance: {max_accuracy:.2f}%')
-            print(f'Min loss: {min_val_loss}')
+            print(f'Max val score: {max_accuracy:.2f}%')
+            print(f'Min val loss: {min_val_loss}')
             
-            log_stats = {**{f'train_{k}': v.item() for k, v in train_stats.items() if k != "prediction"},
+            log_stats = {'train_loss': average_loss,
+                        'train_score': average_score,
                         'train_min_lr': min_lr,
                         'train_max_lr': max_lr,
-                        **{f'val_{k}': v for k, v in test_stats.items() if k != "prediction"},
+                        **{f'val_{k}': v.item() if isinstance(v, torch.Tensor) else v for k, v in test_stats.items() if k != "prediction"},
                         'epoch': epoch,
                         'n_parameters': n_parameters,
                         'time': epoch_training_time}
         else:
-            log_stats = {**{f'train_{k}': v.item() for k, v in train_stats.items() if k != "prediction"},
-                         **{f'test_{k}': v for k, v in test_stats.items() if k != "prediction"},
-                         'train_min_lr': min_lr,
-                         'train_max_lr': max_lr,
-                         'epoch': epoch,
-                         'n_parameters': n_parameters,
-                         'time': epoch_training_time}
+            log_stats = {'train_loss': average_loss,
+                        'train_score': average_score,
+                        'train_min_lr': min_lr,
+                        'train_max_lr': max_lr,
+                        **{f'val_{k}': v.item() if isinstance(v, torch.Tensor) else v for k, v in test_stats.items() if k != "prediction"},
+                        'epoch': epoch,
+                        'n_parameters': n_parameters,
+                        'time': epoch_training_time}
 
         if args.output_dir:
             with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:

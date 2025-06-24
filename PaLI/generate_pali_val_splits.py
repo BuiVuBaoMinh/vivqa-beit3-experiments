@@ -1,13 +1,15 @@
 import json
+import random
 
-train_en_full = "/home/lenovo/exp1/data/vivqa/vqa/train_en_full.json"
-train_vi_full = "/home/lenovo/exp1/data/vivqa/vqa/train_vi_full.json"
+train_en_full = "/home/21khac.dd/bm/data/vivqa/vqa/train_en_full.json"
+train_vi_full = "/home/21khac.dd/bm/data/vivqa/vqa/train_vi_full.json"
 
 with open(train_en_full, "r", encoding="utf-8") as en_f:
     train_en_full_data = json.load(en_f)
     train_en_path = train_en_full.replace("train_en_full.json", "train_en.json")
     val_en_path = train_en_full.replace("train_en_full.json", "val_en.json")
 
+    random.shuffle(train_en_full_data)
     val_en_data = train_en_full_data[:1000]
     train_en_data = train_en_full_data[1000:]
 
@@ -33,6 +35,7 @@ with open(train_vi_full, "r", encoding="utf-8") as vi_f:
     train_vi_path = train_vi_full.replace("train_vi_full.json", "train_vi.json")
     val_vi_path = train_vi_full.replace("train_vi_full.json", "val_vi.json")
 
+    random.shuffle(train_vi_full_data)
     val_vi_data = train_vi_full_data[:1000]
     train_vi_data = train_vi_full_data[1000:]
 

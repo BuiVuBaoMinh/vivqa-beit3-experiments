@@ -93,6 +93,7 @@ def create_pali_dataloader(dataset, is_train, batch_size, num_workers, pin_mem, 
 
 def create_pali_dataset_by_split(args, split, is_train=True, phobert_tokenizer=None):
     json_path = args.data_path + f"/vqa/{split}_{'en' if phobert_tokenizer is None else 'vi'}.json"
+    print(f"Creating dataset '{split}' from data path {json_path}")
     if split=="train" or split=="val":
         image_dir = args.data_path + "/images/train"
     if split=="test":
