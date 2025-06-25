@@ -289,6 +289,8 @@ def main(args, ds_init):
             if lr_schedule_values is not None and data_iter_step % args.update_freq == 0:
                 for i, param_group in enumerate(optimizer.param_groups):
                     if lr_schedule_values is not None:
+                        if global_step < 0 or global_step > len(lr_schedule_values):
+                            print(f"DEBUG: global step: {global_step}, len lr_schedule_values: {len(lr_schedule_values)}")
                         param_group["lr"] = lr_schedule_values[global_step] * param_group.get("lr_scale", 1.0)
 
             train_stats = task_handler.train_batch(
@@ -360,6 +362,9 @@ def main(args, ds_init):
                 if max_accuracy_stop < test_stats['score']:
                     max_accuracy_stop = test_stats['score']
 
+            
+            print(f"Current epochs without improvements: {epochs_without_improvements}")
+
             print(f'Max val score: {max_accuracy:.2f}%')
             print(f'Min val loss: {min_val_loss}')
             
@@ -385,7 +390,7 @@ def main(args, ds_init):
             with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
-        if epochs_without_improvements >= patience:
+        if epochs_without_improvements >= patience and average_score >= 95:
             print(f"No improvement in {patience} consecutive epochs. Early stopping.")
             break
 

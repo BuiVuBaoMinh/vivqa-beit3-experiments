@@ -8,30 +8,52 @@ torchrun --nproc-per-node=1 train_pali.py \
     --eval \
     --eval_num_beams 5
 ```
-
-# PaLI-PhoBERT train
+# PaLI-Phobert normal train
 ```bash
 torchrun --nproc-per-node=1 train_pali.py \
     --batch_size 8 \
     --epochs 100 \
     --layer_decay 1 \
     --lr 6e-5 \
-    --min_lr 1e-5 \
+    --min_lr 2e-5 \
     --update_freq 1 \
     --warmup_epochs 1 \
     --data_path /home/21khac.dd/bm/data/vivqa \
-    --output_dir /home/21khac.dd/bm/pali-pb-3 \
+    --output_dir /home/21khac.dd/bm/pali-pb-4 \
     --num_workers=10 \
     --weight_decay 0.01 \
     --save_ckpt_freq 1 \
     --task_head_lr_weight 20 \
     --opt_betas 0.9 0.98 \
     --early_stopping "val_score" \
-    --patience 50 \
+    --patience 5 \
     --phobert \
     --lr_sched_type cos \
-    --resume "latest" 
-    --no_resume_optimizer
+    --resume "latest"
+```
+
+# PaLI-PhoBERT staged train
+```bash
+torchrun --nproc-per-node=1 pali_staged_training.py \
+    --batch_size 8 \
+    --epochs 110 \
+    --layer_decay 1 \
+    --lr 6e-5 \
+    --min_lr 2e-5 \
+    --update_freq 1 \
+    --warmup_epochs 0 \
+    --data_path /home/21khac.dd/bm/data/vivqa \
+    --output_dir /home/21khac.dd/bm/pali-pb-5 \
+    --num_workers=10 \
+    --weight_decay 0.01 \
+    --save_ckpt_freq 1 \
+    --task_head_lr_weight 20 \
+    --opt_betas 0.9 0.98 \
+    --early_stopping "val_score" \
+    --patience 5 \
+    --phobert \
+    --lr_sched_type cos \
+    --staged_training 
 ```
 
 PaLI-PhoBERT eval
