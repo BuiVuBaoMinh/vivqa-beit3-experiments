@@ -21,7 +21,6 @@ from pali_dataset import ViVQAPaLIDataset, create_pali_datasets
 from pali import PaLI, PaLI_PhoBERT
 from pali_engine_for_finetuning import PaLIHandler, pali_evaluate
 from pali_utils import pali_dump_predictions, pali_save_model, pali_auto_resume
-from pali_phobert import create_pali_phobert_model
 
 import utils
 from optim_factory import create_optimizer, get_parameter_groups, \

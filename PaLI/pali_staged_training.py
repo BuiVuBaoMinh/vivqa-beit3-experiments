@@ -18,10 +18,9 @@ from transformers import AutoModel, AutoTokenizer, PhobertTokenizer
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from pali_dataset import ViVQAPaLIDataset, create_pali_datasets
-from pali import PaLI, PaLI_PhoBERT
-from pali_engine_for_finetuning import PaLIHandler, pali_evaluate
+from pali import PaLI, PaLI_PhoBERT, PaLI_Classification, PaLI_Classification_PhoBERT
+from pali_engine_for_finetuning import PaLIHandler, PaLIClassificationHandler, pali_evaluate
 from pali_utils import pali_dump_predictions, pali_save_model, pali_auto_resume
-from pali_phobert import create_pali_phobert_model
 
 import utils
 from optim_factory import create_optimizer, get_parameter_groups, \
@@ -71,6 +70,8 @@ def get_args():
      # Dataset parameters
     parser.add_argument('--data_path', default='/root/projects/exp1/data/vivqa', type=str,
                         help='dataset path')
+    parser.add_argument('--answer2label', default=None, type=str,
+                        help='answer2label.txt path')
 
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
@@ -110,11 +111,10 @@ def get_args():
                         help="Determine the early stopping criteria. Supports val_score and val_loss")
     parser.add_argument('--eval_num_beams', type=int, default=1,
                         help="Number of beam used for beam search in PaLI.generate()")
-
-    # <<< START NEW/MODIFIED ARGS >>>
     parser.add_argument('--staged_training', action='store_true', default=False,
                         help="Enable 3-stage gradual unfreezing training.")
-    # <<< END NEW/MODIFIED ARGS >>>
+    parser.add_argument('--pali_class', default="pali_generative", choices = ["pali_classification", "pali_generative"],
+                        help="Enable 3-stage gradual unfreezing training.")
 
     # Custom resume args
     parser.add_argument('--no_resume_optimizer', action="store_true", default=False,
@@ -131,21 +131,20 @@ def get_args():
 # <<< START HELPER FUNCTIONS FOR STAGED TRAINING >>>
 
 def get_resume_stage_index(global_epoch, stages):
+    print(f"{global_epoch}")
     cnt = 0
     for i, stage_config in enumerate(stages):
-        if cnt + stage_config["epochs"] >= global_epoch:
-            return i
-        else: 
-            cnt += stage_config["epochs"]
+        cnt += stage_config["epochs"]
+        if cnt > global_epoch:
+            return i            
 
-def log_model_architecture(model, output_dir, stage_name):
+def log_model_architecture(model, output_dir, stage_config):
     """Saves a file detailing which parameters are trainable/frozen for a given stage."""
-    sanitized_stage_name = stage_name.replace(' ', '_').replace(':', '')
-    filepath = os.path.join(output_dir, f"Model_Architecture_{sanitized_stage_name}.txt")
-    print(f"Logging model architecture for stage '{stage_name}' to {filepath}")
+    filepath = os.path.join(output_dir, f"Model_Architecture_{stage_config['name']}.txt")
+    print(f"Logging model architecture for stage '{stage_config['name']}' to {filepath}")
 
     with open(filepath, "w") as f:
-        f.write(f"--- Model Architecture for Stage: {stage_name} ---\n\n")
+        f.write(f"--- Model Architecture for Stage: {stage_config['name']} ---\n\n")
         
         trainable_params = []
         frozen_params = []
@@ -173,6 +172,9 @@ def log_model_architecture(model, output_dir, stage_name):
         f.write(f"Total params: {sum(p.numel() for p in model.parameters())}\n")
         f.write(f"Frozen params: {sum(p.numel() for p in model.parameters() if not p.requires_grad)}\n")
         f.write(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}\n")
+
+        f.write("\n--- Stage Config ---\n")
+        json.dump(stage_config, f, ensure_ascii=False)
 
 def setup_model_for_stage(model, stage_config):
     """Freezes/unfreezes model parameters based on the stage configuration."""
@@ -208,12 +210,24 @@ def setup_model_for_stage(model, stage_config):
         unfreeze_layers = stage_config.get('unfreeze_mt5_decoder_layers', 0)
         if unfreeze_layers > 0:
             print(f"Unfreezing the top {unfreeze_layers} layers of the mT5 DECODER.")
-            for layer in model.mt5.decoder.block[-unfreeze_layers:]:
-                for param in layer.parameters():
-                    param.requires_grad = True
+            if isinstance(model, (PaLI, PaLI_PhoBERT)):
+                for layer in model.mt5.decoder.block[-unfreeze_layers:]:
+                    for param in layer.parameters():
+                        param.requires_grad = True
+            elif isinstance(model, (PaLI_Classification, PaLI_Classification_PhoBERT)):
+                for layer in model.mt5.transformer.decoder.block[-unfreeze_layers:]:
+                    for param in layer.parameters():
+                        param.requires_grad = True
             print("Rest of mT5 is FROZEN.")
         else:
             print("Entire mT5 backbone is FROZEN.")
+
+    # Always train the classification head
+    if not stage_config.get('freeze_mt5_head', True):
+        if isinstance(model, (PaLI_Classification, PaLI_Classification_PhoBERT)):
+            for name, param in model.named_parameters():
+                if "classification_head" in name:
+                    param.requires_grad = True
 
 def create_stage_optimizer(model, stage_config, args):
     """Creates an optimizer with differential learning rates for a specific stage."""
@@ -237,11 +251,22 @@ def create_stage_optimizer(model, stage_config, args):
         print(f"ViT backbone LR: {stage_config['lrs']['vit']:.1e}")
 
     # Group 3: mT5 Backbone
-    mt5_params = [p for p in model.mt5.parameters() if p.requires_grad]
+    mt5_params = []
+    for name, param in model.mt5.named_parameters():
+        if not "classification_head" in name and param.requires_grad:
+            mt5_params.append(param)
     if mt5_params:
         base_lr = stage_config['lrs']['mt5']
         param_groups.append({'params': mt5_params, 'lr': base_lr, 'group_base_lr': base_lr})
         print(f"mT5 backbone LR: {stage_config['lrs']['mt5']:.1e}")
+
+    # Group 4: mT5 classification head
+    if isinstance(model, (PaLI_PhoBERT, PaLI_Classification_PhoBERT)):
+        mt5_head = [p for p in model.mt5.classification_head.parameters() if p.requires_grad]
+        if mt5_head:
+            base_lr = stage_config['lrs']['mt5_head']
+            param_groups.append({'params': mt5_head, 'lr': base_lr, 'group_base_lr': base_lr})
+            print(f"mT5 classification head LR: {stage_config['lrs']['mt5_head']:.1e}")
         
     return AdamW(param_groups, eps=args.opt_eps, betas=args.opt_betas, weight_decay=args.weight_decay)
 
@@ -305,9 +330,14 @@ def train_stage(stage_config, global_epoch_start, model,
                     lr_scale = lr_schedule_values[global_step_in_stage] / stage_base_lr
                     param_group["lr"] = group_base_lr * lr_scale
             
-            train_stats = task_handler.train_batch(
-                model, dataset_train.tokenizer, pixel_values, input_ids, attention_mask, labels, qid
-            )
+            if isinstance(task_handler, PaLIClassificationHandler):
+                train_stats = task_handler.train_batch(
+                    model, args.batch_size, pixel_values, input_ids, attention_mask, labels
+                )
+            elif isinstance(task_handler, PaLIHandler):
+                train_stats = task_handler.train_batch(
+                    model, dataset_train.tokenizer, pixel_values, input_ids, attention_mask, labels, qid
+                )
             
             loss = train_stats["loss"]
             batch_score = train_stats["score"]
@@ -345,7 +375,9 @@ def train_stage(stage_config, global_epoch_start, model,
                 pali_save_model(args=args, epoch=epoch, model=model, optimizer=optimizer)
                 
         if data_loader_val is not None:
-            test_stats = pali_evaluate(data_loader_val, model, dataset_val.tokenizer, device, task_handler)
+            test_stats = pali_evaluate(
+                data_loader_val, model, dataset_val.tokenizer, device, task_handler, batch_size=args.batch_size
+            )
             print(f"Performance of the network on the {len(data_loader_val)} val batches: {test_stats['score']:.1f}%")
 
             if metric_trackers['max_accuracy'] < test_stats['score']:
@@ -399,7 +431,7 @@ def train_stage(stage_config, global_epoch_start, model,
             with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
-        if metric_trackers['epochs_without_improvements'] >= args.patience and average_score >= 85:
+        if metric_trackers['epochs_without_improvements'] >= args.patience: # and average_score >= 85:
             print(f"No improvement in {args.patience} consecutive epochs. Early stopping stage.")
             return True # Signal to stop all training
     
@@ -418,10 +450,24 @@ def main(args, ds_init):
     phobert_tokenizer = None
 
     if args.phobert:
-        model = PaLI_PhoBERT(device=device).to(device)
         phobert_tokenizer = AutoTokenizer.from_pretrained("vinai/phobert-base-v2")
+
+    if args.pali_class == "pali_classification":
+        if args.phobert:
+            model = PaLI_Classification_PhoBERT(
+                answer2label_path=args.answer2label,
+                device=device
+            ).to(device, non_blocking=True)
+        else:
+            model = PaLI_Classification(
+                answer2label_path=args.answer2label,
+                device=device
+            ).to(device, non_blocking=True)
     else:
-        model = PaLI(device=device).to(device, non_blocking=True)
+        if args.phobert:
+            model = PaLI_PhoBERT(device=device).to(device)
+        else:
+            model = PaLI(device=device).to(device, non_blocking=True)
 
     dataset_train, data_loader_train, dataset_val, data_loader_val = create_pali_datasets(
         args,
@@ -432,7 +478,10 @@ def main(args, ds_init):
 
     print('Number of params:', n_parameters)
 
-    task_handler = PaLIHandler()
+    if args.pali_class == "pali_classification":
+        task_handler = PaLIClassificationHandler()
+    else:
+        task_handler = PaLIHandler()
 
     if args.eval:
         pali_auto_resume(args, model=model, optimizer=None, device=device) # Load best checkpoint for eval
@@ -441,14 +490,24 @@ def main(args, ds_init):
             is_eval = True,
             phobert_tokenizer = phobert_tokenizer 
         )
-        result = pali_evaluate(
-            data_loader_test,
-            model,
-            dataset_test.tokenizer,
-            device, task_handler,
-            True,
-            args.eval_num_beams
-        )
+        if isinstance(model, (PaLI_Classification, PaLI_Classification_PhoBERT)):
+            result = pali_evaluate(
+                data_loader_test,
+                model,
+                dataset_test.tokenizer,
+                device, 
+                task_handler,
+                True,
+                batch_size=args.batch_size)
+        elif isinstance(model, (PaLI, PaLI_PhoBERT)):
+            result = pali_evaluate(
+                data_loader_test,
+                model,
+                dataset_test.tokenizer,
+                device, task_handler,
+                True,
+                args.eval_num_beams
+            )
         pali_dump_predictions(args, result["prediction"], "vivqa_pali_test")
         exit(0)
     
@@ -465,24 +524,27 @@ def main(args, ds_init):
                 'epochs': 5,
                 'freeze_vit': True,
                 'freeze_mt5': True,
+                'freeze_mt5_head': True,
                 'unfreeze_mt5_decoder_layers': 0,
-                'lrs': {'bridge': 1e-4, 'mt5': 0, 'vit': 0}
+                'lrs': {'bridge': 1e-4, 'mt5': 0, 'vit': 0, 'mt5_head': 1e-4},
             },
             {
                 'name': 'Stage 2 Adapt Decoder Head',
                 'epochs': 5,
                 'freeze_vit': True,
                 'freeze_mt5': True,
+                'freeze_mt5_head': False,
                 'unfreeze_mt5_decoder_layers': 2, # Unfreeze top 2 layers of mT5 decoder
-                'lrs': {'bridge': 5e-5, 'mt5': 1e-5, 'vit': 0}
+                'lrs': {'bridge': 5e-5, 'mt5': 2e-5, 'vit': 0, 'mt5_head': 1e-4}
             },
             {
                 'name': 'Stage 3 Full Fine-Tuning',
-                'epochs': 100,
+                'epochs': 40,
                 'freeze_vit': False,
                 'freeze_mt5': False,
+                'freeze_mt5_head': False,
                 'unfreeze_mt5_decoder_layers': 0, # ignored as freeze_mt5 is False
-                'lrs': {'bridge': 1e-5, 'mt5': 5e-6, 'vit': 1e-6}
+                'lrs': {'bridge': 2e-5, 'mt5': 5e-6, 'vit': 5e-6, 'mt5_head': 2e-5}
             }
         ]
         
@@ -521,7 +583,7 @@ def main(args, ds_init):
             stage_config['name'] = f"Stage_{i+1}_{stage_config['name']}" # Add number to name
             setup_model_for_stage(model, stage_config)
             
-            log_model_architecture(model, args.output_dir, stage_config['name'])
+            log_model_architecture(model, args.output_dir, stage_config)
             
             if args.resume != '':
                 optimizer = old_optimizer
