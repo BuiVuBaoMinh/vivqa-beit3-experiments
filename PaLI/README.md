@@ -42,7 +42,7 @@ torchrun --nproc-per-node=1 pali_staged_training.py \
     --update_freq 1 \
     --warmup_epochs 0 \
     --data_path /home/21khac.dd/bm/data/vivqa \
-    --output_dir /home/21khac.dd/bm/pali-classification-1 \
+    --output_dir /home/21khac.dd/bm/pali-classification-pb-2-re \
     --num_workers=10 \
     --weight_decay 0.05 \
     --save_ckpt_freq 1 \
@@ -53,8 +53,10 @@ torchrun --nproc-per-node=1 pali_staged_training.py \
     --lr_sched_type cos \
     --staged_training \
     --pali_class pali_classification \
-    --answer2label "/home/21khac.dd/bm/data/vivqa/annotations/dicts/answer2label_hand_translated.txt" \
-    --device "cuda:7"
+    --device "cuda:6" \
+    --phobert
+    --resume "latest" \
+    --no_resume_optimizer \
 
 ```
 
@@ -64,11 +66,13 @@ torchrun --nproc-per-node=1 pali_staged_training.py \
     --batch_size 8 \
     --eval_batch_size 8 \
     --data_path /home/21khac.dd/bm/data/vivqa \
-    --output_dir /home/21khac.dd/bm/pali-classification-pb-2 \
+    --output_dir /home/21khac.dd/bm/pali-pb-7-no-clone-lmhead \
     --resume "best" \
     --eval \
     --eval_num_beams 1 \
     --staged_training \
-    --phobert \
-    --device "cuda:2"
+    --pali_class pali_generative \
+    --answer2label "/home/21khac.dd/bm/data/vivqa/annotations/dicts/answer2label_hand_translated.txt" \
+    --device "cuda:7" \
+    --phobert
 ```

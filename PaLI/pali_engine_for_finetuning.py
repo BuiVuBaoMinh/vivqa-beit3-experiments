@@ -129,9 +129,10 @@ class PaLIClassificationHandler(object):
         Performs a single training step.
         """
 
-        if torch.any(labels < 0) or torch.any(labels >= len(model.label2answer)-1):
+        if torch.any(labels < 0) or torch.any(labels > len(model.label2answer)-1):
             print(f"Invalid or UNKNOWN labels detected WHILE TRAINING! Min: {labels.min().item()}, Max: {labels.max().item()}")
             print(f"Labels: {labels.cpu().tolist()}")
+            print(f"Model labels: 0..{len(model.label2answer)}")
             raise ValueError("Label out of bounds for logits")
 
         # Check shapes and types before forward pass
@@ -202,6 +203,13 @@ class PaLIClassificationHandler(object):
         # print(">>> Debug: attention_mask shape =", attention_mask.shape)
         # print(">>> Debug: labels shape =", labels.shape)
         # print(">>> Debug: labels dtype =", labels.dtype)
+
+        
+        if torch.any(labels < 0) or torch.any(labels > len(model.label2answer)-1):
+            print(f"Invalid or UNKNOWN labels detected WHILE EVALUATING! Min: {labels.min().item()}, Max: {labels.max().item()}")
+            print(f"Labels: {labels.cpu().tolist()}")
+            print(f"Model labels: 0..{len(model.label2answer)}")
+            raise ValueError("Label out of bounds for logits")
 
         outputs = model(
             batch_size=batch_size,

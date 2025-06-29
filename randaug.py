@@ -28,7 +28,11 @@ def autocontrast_func(img, cutoff=0):
             table = np.arange(n_bins)
         else:
             scale = (n_bins - 1) / (high - low)
-            offset = -low * scale
+            try:
+                offset = -low * scale
+            except OverflowError:
+                print(f"Overflow: low={low}, scale={scale}, set offset to 0.0")
+                offset = 0.0  # or some fallback value
             table = np.arange(n_bins) * scale + offset
             table[table < 0] = 0
             table[table > n_bins - 1] = n_bins - 1

@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import timm
 
-from transformers import MT5ForConditionalGeneration, ViTModel, MT5Config, RobertaModel, AutoTokenizer, MT5ForSequenceClassification
+from transformers import MT5ForConditionalGeneration, ViTModel, MT5Config, RobertaModel, AutoTokenizer, MT5ForSequenceClassification, ViTConfig
 
 import py_vncorenlp
 
@@ -96,8 +96,20 @@ class PaLI_PhoBERT(nn.Module):
         device=None
     ):
         super().__init__()
-        self.vit = ViTModel.from_pretrained(pretrained_model_name_or_path=vit_model_name)
+
+        self.vit_config = ViTConfig.from_pretrained(vit_model_name)
+        self.vit_config.hidden_dropout_prob = 0.2
+        self.vit_config.attention_probs_dropout_prob = 0.1
+
+        self.vit = ViTModel.from_pretrained(
+            pretrained_model_name_or_path=vit_model_name,
+            config = self.vit_config
+        )
+        
         self.mt5_config = MT5Config.from_pretrained(text_component_model_name)
+        self.mt5_config.dropout_rate = 0.3
+        self.mt5_config.classifier_dropout = 0.1
+
         self.mt5 = MT5ForConditionalGeneration.from_pretrained(
             pretrained_model_name_or_path = text_component_model_name,
             config = self.mt5_config
@@ -134,11 +146,11 @@ class PaLI_PhoBERT(nn.Module):
             # so resizing and modifying the input embeddings should also affect the output embeddings (lm_head).
             # We can verify this.
 
-            # if self.mt5.get_input_embeddings() is self.mt5.get_output_embeddings():
-            #      print("Input and output embeddings are tied. No separate transplantation needed for the output head.")
-            # else:
-            #     print("Input and output embeddings are not tied. Transplanting output head weights separately.")
-            #     self.mt5.get_output_embeddings().weight.data[:new_vocab_size, :] = phobert_word_embeddings.clone()
+            if self.mt5.get_input_embeddings() is self.mt5.get_output_embeddings():
+                 print("Input and output embeddings are tied. No separate transplantation needed for the output head.")
+            else:
+                print("Input and output embeddings are not tied. Transplanting output head weights separately.")
+                self.mt5.get_output_embeddings().weight.data[:new_vocab_size, :] = phobert_word_embeddings.clone()
 
         print("Weight transplantation of word embeddings complete.")
 
@@ -151,7 +163,8 @@ class PaLI_PhoBERT(nn.Module):
         
         print("Model config updated.")
         self.vision_proj = nn.Linear(self.vit.config.hidden_size, self.mt5.config.d_model) # Project to match mT5, to train fusion
-        self.vision_dropout = nn.Dropout(p=0.1) # add regularizing effect to vision_proj
+        # self.vision_dropout = nn.Dropout(p=0.1) # add regularizing effect to vision_proj
+        self.vision_dropout = nn.Dropout(p=0.2) # add regularizing effect to vision_proj
         self.vision_layernorm = nn.LayerNorm(self.mt5.config.d_model) # may stablilize fusion?
         self.device = device
 
@@ -232,7 +245,13 @@ class PaLI_Classification(nn.Module):
         num_labels = len(self.label2answer)
         print(f"PaLI_Classification: num_labels = {num_labels}")
 
-        self.vit = ViTModel.from_pretrained(pretrained_model_name_or_path=vit_model_name)
+        self.vit_config = ViTConfig.from_pretrained(vit_model_name)
+        # self.vit_config.hidden_dropout_prob = 0.2
+        # self.vit_config.attention_probs_dropout_prob = 0.1
+        self.vit = ViTModel.from_pretrained(
+            pretrained_model_name_or_path=vit_model_name,
+            config = self.vit_config
+        )
 
         self.mt5_config = MT5Config.from_pretrained(
             text_component_model_name,
@@ -240,13 +259,16 @@ class PaLI_Classification(nn.Module):
             id2label = self.label2answer,
             label2id = self.answer2label,
         )
+        # self.mt5_config.dropout_rate = 0.3
+        # self.mt5_config.classifier_dropout = 0.1
         self.mt5 = MT5ForSequenceClassification.from_pretrained(
             pretrained_model_name_or_path = text_component_model_name,
             config = self.mt5_config
         )
-        
+
         self.vision_proj = nn.Linear(self.vit.config.hidden_size, self.mt5.config.d_model) # Project to match mT5, to train fusion
-        self.vision_dropout = nn.Dropout(p=0.5) # add regularizing effect to vision_proj
+        # self.vision_dropout = nn.Dropout(p=0.2) # add regularizing effect to vision_proj, 0.1 is initial value
+        self.vision_dropout = nn.Dropout(p=0.5)
         self.vision_layernorm = nn.LayerNorm(self.mt5.config.d_model) # may stablilize fusion?
         self.device = device
 
@@ -350,11 +372,11 @@ class PaLI_Classification(nn.Module):
         label2answer = {idx: ans for ans, idx in answer2label.items()}
         print(f"Reindexed {len(answer2label)} unique answers to labels 0 through {len(answer2label) - 1}.")
 
-        # answer2label["UNKNOWN"] = len(answer2label)
-        # label2answer[len(label2answer)] = "UNKNOWN"
-        # print("Append a default UNKNOWN label.")
+        answer2label["UNKNOWN"] = len(answer2label)
+        label2answer[len(label2answer)] = "UNKNOWN"
+        print("Append a default UNKNOWN label.")
 
-        print(f"Loaded {len(answer2label)} classes from {file_path}.")
+        print(f"Loaded {len(answer2label)-1} classes from {file_path}.")
         return answer2label, label2answer
     
     def get_num_layers(self):
@@ -385,7 +407,14 @@ class PaLI_Classification_PhoBERT(nn.Module):
         num_labels = len(self.label2answer)
         print(f"PaLI_Classification: num_labels = {num_labels}")
 
-        self.vit = ViTModel.from_pretrained(pretrained_model_name_or_path=vit_model_name)
+        self.vit_config = ViTConfig.from_pretrained(vit_model_name)
+        self.vit_config.hidden_dropout_prob = 0.2
+        self.vit_config.attention_probs_dropout_prob = 0.1
+
+        self.vit = ViTModel.from_pretrained(
+            pretrained_model_name_or_path=vit_model_name,
+            config = self.vit_config
+        )
 
         self.mt5_config = MT5Config.from_pretrained(
             text_component_model_name,
@@ -393,6 +422,9 @@ class PaLI_Classification_PhoBERT(nn.Module):
             id2label = self.label2answer,
             label2id = self.answer2label,
         )
+        self.mt5_config.dropout_rate = 0.3
+        self.mt5_config.classifier_dropout = 0.1
+
         self.mt5 = MT5ForSequenceClassification.from_pretrained(
             pretrained_model_name_or_path = text_component_model_name,
             config = self.mt5_config
@@ -428,7 +460,7 @@ class PaLI_Classification_PhoBERT(nn.Module):
         self.mt5.config.decoder_start_token_id = phobert_tokenizer.bos_token_id # T5 uses this
         
         self.vision_proj = nn.Linear(self.vit.config.hidden_size, self.mt5.config.d_model) # Project to match mT5, to train fusion
-        self.vision_dropout = nn.Dropout(p=0.5) # add regularizing effect to vision_proj
+        self.vision_dropout = nn.Dropout(p=0.2) # add regularizing effect to vision_proj
         self.vision_layernorm = nn.LayerNorm(self.mt5.config.d_model) # may stablilize fusion?
         self.device = device
 
@@ -535,7 +567,7 @@ class PaLI_Classification_PhoBERT(nn.Module):
         label2answer[len(label2answer)] = "UNKNOWN"
         print("Append a default UNKNOWN label.")
 
-        print(f"Loaded {len(answer2label)} classes from {file_path}.")
+        print(f"Loaded {len(answer2label)-1} classes from {file_path}.")
         return answer2label, label2answer
     
     def get_num_layers(self):

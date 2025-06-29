@@ -261,7 +261,7 @@ def create_stage_optimizer(model, stage_config, args):
         print(f"mT5 backbone LR: {stage_config['lrs']['mt5']:.1e}")
 
     # Group 4: mT5 classification head
-    if isinstance(model, (PaLI_PhoBERT, PaLI_Classification_PhoBERT)):
+    if isinstance(model, (PaLI_Classification, PaLI_Classification_PhoBERT)):
         mt5_head = [p for p in model.mt5.classification_head.parameters() if p.requires_grad]
         if mt5_head:
             base_lr = stage_config['lrs']['mt5_head']
@@ -270,12 +270,24 @@ def create_stage_optimizer(model, stage_config, args):
         
     return AdamW(param_groups, eps=args.opt_eps, betas=args.opt_betas, weight_decay=args.weight_decay)
 
+def log_model_config(model, output_dir):
+    outfile = os.path.join(output_dir, f"model_config.txt")
+    with open(outfile, "w") as f:
+        f.write(f"--- ViT Config ---")
+        json.dump(model.vit.config.to_dict(), f,  indent = 4)
+        
+        f.write("\n\n--- mT5 Config ---\n\n")
+        json.dump(model.mt5_config.to_dict(), f, indent = 4)
+
+        f.write("\n\n--- Vision Projection Dropout ---\n\n")
+        f.write(f"Vision Proj dropout rate: {model.vision_dropout.p}")
 def train_stage(stage_config, global_epoch_start, model,
                 data_loader_train, dataset_train, 
                 data_loader_val, dataset_val,
                 optimizer, device, task_handler, args,
                 # Pass metric trackers by reference (as a dict) to modify them
-                metric_trackers):
+                metric_trackers,
+                stage_index):
 
     stage_epochs = stage_config['epochs']
     print(f"\nTraining for {stage_epochs} epochs...")
@@ -431,7 +443,7 @@ def train_stage(stage_config, global_epoch_start, model,
             with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
-        if metric_trackers['epochs_without_improvements'] >= args.patience: # and average_score >= 85:
+        if metric_trackers['epochs_without_improvements'] >= args.patience and stage_index >= 2: # and average_score >= 85:
             print(f"No improvement in {args.patience} consecutive epochs. Early stopping stage.")
             return True # Signal to stop all training
     
@@ -482,6 +494,8 @@ def main(args, ds_init):
         task_handler = PaLIClassificationHandler()
     else:
         task_handler = PaLIHandler()
+
+    log_model_config(model, args.output_dir)
 
     if args.eval:
         pali_auto_resume(args, model=model, optimizer=None, device=device) # Load best checkpoint for eval
@@ -589,16 +603,14 @@ def main(args, ds_init):
                 optimizer = old_optimizer
             else:
                 optimizer = create_stage_optimizer(model, stage_config, args)
-
-            # To support resuming, we should load the model/optimizer state here before starting the stage
-            # This is a simplified version that starts fresh each run. For full resume, more logic is needed.
             
             should_stop = train_stage(
                 stage_config, global_epoch, model,
                 data_loader_train, dataset_train,
                 data_loader_val, dataset_val,
                 optimizer, device, task_handler, args,
-                metric_trackers=metric_trackers
+                metric_trackers=metric_trackers,
+                stage_index = i
             )
 
             global_epoch += stage_config['epochs']
