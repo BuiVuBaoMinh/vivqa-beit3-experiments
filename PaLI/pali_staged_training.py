@@ -222,6 +222,12 @@ def setup_model_for_stage(model, stage_config):
         else:
             print("Entire mT5 backbone is FROZEN.")
 
+    # Handle word embedding layer (mt5.shared), only for PhoBERT integration
+    if stage_config.get('freeze_word_embeddings', True):
+        if isinstance(model, (PaLI_Classification_PhoBERT)):
+            for layer in model.mt5.transformer.shared.parameters():
+                param.requires_grad = False
+
     # Always train the classification head
     if not stage_config.get('freeze_mt5_head', True):
         if isinstance(model, (PaLI_Classification, PaLI_Classification_PhoBERT)):
@@ -539,6 +545,7 @@ def main(args, ds_init):
                 'freeze_vit': True,
                 'freeze_mt5': True,
                 'freeze_mt5_head': True,
+                'freeze_word_embeddings': True,
                 'unfreeze_mt5_decoder_layers': 0,
                 'lrs': {'bridge': 1e-4, 'mt5': 0, 'vit': 0, 'mt5_head': 1e-4},
             },
@@ -548,15 +555,27 @@ def main(args, ds_init):
                 'freeze_vit': True,
                 'freeze_mt5': True,
                 'freeze_mt5_head': False,
+                'freeze_word_embeddings': True,
                 'unfreeze_mt5_decoder_layers': 2, # Unfreeze top 2 layers of mT5 decoder
                 'lrs': {'bridge': 5e-5, 'mt5': 2e-5, 'vit': 0, 'mt5_head': 1e-4}
             },
             {
                 'name': 'Stage 3 Full Fine-Tuning',
-                'epochs': 40,
+                'epochs': 20,
                 'freeze_vit': False,
                 'freeze_mt5': False,
                 'freeze_mt5_head': False,
+                'freeze_word_embeddings': True,
+                'unfreeze_mt5_decoder_layers': 0, # ignored as freeze_mt5 is False
+                'lrs': {'bridge': 2e-5, 'mt5': 5e-6, 'vit': 5e-6, 'mt5_head': 2e-5}
+            },
+            {
+                'name': 'Stage 4 Full Fine-Tuning',
+                'epochs': 20,
+                'freeze_vit': False,
+                'freeze_mt5': False,
+                'freeze_mt5_head': False,
+                'freeze_word_embeddings': False,
                 'unfreeze_mt5_decoder_layers': 0, # ignored as freeze_mt5 is False
                 'lrs': {'bridge': 2e-5, 'mt5': 5e-6, 'vit': 5e-6, 'mt5_head': 2e-5}
             }
