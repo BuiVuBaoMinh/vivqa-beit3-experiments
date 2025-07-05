@@ -13,22 +13,22 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 import torch
 from torch.optim import AdamW
-from transformers import AutoModel, AutoTokenizer, PhobertTokenizer
+from transformers import PhobertTokenizer
+import bitsandbytes as bnb
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from pali_dataset import ViVQAPaLIDataset, create_pali_datasets
-from pali import PaLI, PaLI_PhoBERT, PaLI_Classification, PaLI_Classification_PhoBERT
-from pali_engine_for_finetuning import PaLIHandler, PaLIClassificationHandler, pali_evaluate
-from pali_utils import pali_dump_predictions, pali_save_model, pali_auto_resume
+from paligemma import get_vivqa_paligemma, get_vivqa_paligemma_phobert, PaligemmaForVQAClassification
+from paligemma_dataset import create_paligemma_datasets
+from my_utils import TrainingF1Score, my_dump_predictions, my_save_model, my_auto_resume
+from paligemma_engine_for_finetuning import PaligemmaHandler, paligemma_evaluate
 
 import utils
-from optim_factory import create_optimizer, get_parameter_groups, \
-    LayerDecayValueAssigner, get_is_head_flag_for_vit
+from optim_factory import create_optimizer, LayerDecayValueAssigner, get_is_head_flag_for_vit
 
 
 def get_args():
-    parser = argparse.ArgumentParser('PaLI fine-tuning and evaluation script for image classification', add_help=False)
+    parser = argparse.ArgumentParser('Paligemma fine-tuning and evaluation script for image classification', add_help=False)
 
     # Optimizer parameters
     parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
@@ -109,35 +109,21 @@ def get_args():
                         help='Number of training epochs without improvements.')
     parser.add_argument('--early_stopping', type=str, default='val_score',
                         help="Determine the early stopping criteria. Supports val_score and val_loss")
-    parser.add_argument('--eval_num_beams', type=int, default=1,
-                        help="Number of beam used for beam search in PaLI.generate()")
     parser.add_argument('--staged_training', action='store_true', default=False,
                         help="Enable 3-stage gradual unfreezing training.")
-    parser.add_argument('--pali_class', default="pali_generative", choices = ["pali_classification", "pali_generative"],
-                        help="Enable 3-stage gradual unfreezing training.")
-
+    parser.add_argument('--freeze_embed_tokens', action='store_true', default=False,
+                        help="Freeze Paligemma language model's embed_tokens.")
+    
     # Custom resume args
     parser.add_argument('--no_resume_optimizer', action="store_true", default=False,
                         help="This parameter prevents auto loading optimizer from checkpoint")
     
 
     known_args, _ = parser.parse_known_args()
-
-    ds_init = None
     
-    return parser.parse_args(), ds_init
-
+    return parser.parse_args()
 
 # <<< START HELPER FUNCTIONS FOR STAGED TRAINING >>>
-
-def get_resume_stage_index(global_epoch, stages):
-    print(f"{global_epoch}")
-    cnt = 0
-    for i, stage_config in enumerate(stages):
-        cnt += stage_config["epochs"]
-        if cnt > global_epoch:
-            return i            
-
 def log_model_architecture(model, output_dir, stage_config):
     """Saves a file detailing which parameters are trainable/frozen for a given stage."""
     filepath = os.path.join(output_dir, f"Model_Architecture_{stage_config['name']}.txt")
@@ -176,122 +162,140 @@ def log_model_architecture(model, output_dir, stage_config):
         f.write("\n--- Stage Config ---\n")
         json.dump(stage_config, f, ensure_ascii=False)
 
-def setup_model_for_stage(model, stage_config):
-    """Freezes/unfreezes model parameters based on the stage configuration."""
-    print(f"--- Configuring model for stage: {stage_config['name']} ---")
-    
-    # First, freeze everything to be safe
-    for param in model.parameters():
-        param.requires_grad = False
-
-    # Unfreeze bridge layers (always trainable in this setup)
-    for param in model.vision_proj.parameters():
-        param.requires_grad = True
-    for param in model.vision_layernorm.parameters():
-        param.requires_grad = True
-    
-    print("Bridge layers (vision_proj, vision_layernorm) are TRAINABLE.")
-
-    # Unfreeze ViT based on config
-    if not stage_config.get('freeze_vit', True):
-        for param in model.vit.parameters():
-            param.requires_grad = True
-        print("ViT backbone is TRAINABLE.")
-    else:
-        print("ViT backbone is FROZEN.")
-
-    # Unfreeze mT5 based on config
-    if not stage_config.get('freeze_mt5', True):
-        for param in model.mt5.parameters():
-            param.requires_grad = True
-        print("Entire mT5 backbone is TRAINABLE.")
-    else:
-        # Handle partial unfreezing of mT5 decoder
-        unfreeze_layers = stage_config.get('unfreeze_mt5_decoder_layers', 0)
-        if unfreeze_layers > 0:
-            print(f"Unfreezing the top {unfreeze_layers} layers of the mT5 DECODER.")
-            if isinstance(model, (PaLI, PaLI_PhoBERT)):
-                for layer in model.mt5.decoder.block[-unfreeze_layers:]:
-                    for param in layer.parameters():
-                        param.requires_grad = True
-            elif isinstance(model, (PaLI_Classification, PaLI_Classification_PhoBERT)):
-                for layer in model.mt5.transformer.decoder.block[-unfreeze_layers:]:
-                    for param in layer.parameters():
-                        param.requires_grad = True
-            print("Rest of mT5 is FROZEN.")
-        else:
-            print("Entire mT5 backbone is FROZEN.")
-
-    # Handle word embedding layer (mt5.shared), only for PhoBERT integration
-    if stage_config.get('freeze_word_embeddings', True):
-        if isinstance(model, (PaLI_Classification_PhoBERT)):
-            for layer in model.mt5.transformer.shared.parameters():
-                param.requires_grad = False
-
-    # Always train the classification head
-    if not stage_config.get('freeze_mt5_head', True):
-        if isinstance(model, (PaLI_Classification, PaLI_Classification_PhoBERT)):
-            for name, param in model.named_parameters():
-                if "classification_head" in name:
-                    param.requires_grad = True
-
-def create_stage_optimizer(model, stage_config, args):
-    """Creates an optimizer with differential learning rates for a specific stage."""
-    print(f"--- Creating optimizer for stage: {stage_config['name']} ---")
-    
-    param_groups = []
-
-    # Group 1: Bridge Layers
-    bridge_params = [p for p in model.vision_proj.parameters() if p.requires_grad] + \
-                    [p for p in model.vision_layernorm.parameters() if p.requires_grad]
-    if bridge_params:
-        base_lr = stage_config['lrs']['bridge']
-        param_groups.append({'params': bridge_params, 'lr': base_lr, 'group_base_lr': base_lr})
-        print(f"Bridge layers LR: {stage_config['lrs']['bridge']:.1e}")
-
-    # Group 2: ViT Backbone
-    vit_params = [p for p in model.vit.parameters() if p.requires_grad]
-    if vit_params:
-        base_lr = stage_config['lrs']['vit']
-        param_groups.append({'params': vit_params, 'lr': base_lr, 'group_base_lr': base_lr})
-        print(f"ViT backbone LR: {stage_config['lrs']['vit']:.1e}")
-
-    # Group 3: mT5 Backbone
-    mt5_params = []
-    for name, param in model.mt5.named_parameters():
-        if not "classification_head" in name and param.requires_grad:
-            mt5_params.append(param)
-    if mt5_params:
-        base_lr = stage_config['lrs']['mt5']
-        param_groups.append({'params': mt5_params, 'lr': base_lr, 'group_base_lr': base_lr})
-        print(f"mT5 backbone LR: {stage_config['lrs']['mt5']:.1e}")
-
-    # Group 4: mT5 classification head
-    if isinstance(model, (PaLI_Classification, PaLI_Classification_PhoBERT)):
-        mt5_head = [p for p in model.mt5.classification_head.parameters() if p.requires_grad]
-        if mt5_head:
-            base_lr = stage_config['lrs']['mt5_head']
-            param_groups.append({'params': mt5_head, 'lr': base_lr, 'group_base_lr': base_lr})
-            print(f"mT5 classification head LR: {stage_config['lrs']['mt5_head']:.1e}")
+def get_resume_stage_index(global_epoch, stages):
+    print(f"{global_epoch}")
+    cnt = 0
+    for i, stage_config in enumerate(stages):
+        cnt += stage_config["epochs"]
+        if cnt > global_epoch:
+            return i  
         
-    return AdamW(param_groups, eps=args.opt_eps, betas=args.opt_betas, weight_decay=args.weight_decay)
-
-def log_model_config(model, output_dir):
+def log_paligemma_model_config(model: PaligemmaForVQAClassification, output_dir):
     outfile = os.path.join(output_dir, f"model_config.txt")
     with open(outfile, "w") as f:
-        f.write(f"--- ViT Config ---")
-        json.dump(model.vit.config.to_dict(), f,  indent = 4)
+        f.write(f"--- Paligemma Language Model Config ---")
+        json.dump(model.paligemma.language_model.config.to_dict(), f,  indent = 4)
         
-        f.write("\n\n--- mT5 Config ---\n\n")
-        json.dump(model.mt5_config.to_dict(), f, indent = 4)
+        f.write("\n\n--- Paligemma Vision Tower Config ---\n\n")
+        json.dump(model.paligemma.vision_tower.config.to_dict(), f, indent = 4)
 
-        f.write("\n\n--- Vision Projection Dropout ---\n\n")
-        f.write(f"Vision Proj dropout rate: {model.vision_dropout.p}")
+        f.write("\n\n--- Paligemma Model Config ---\n\n")
+        json.dump(model.paligemma.config.to_dict(), f, indent = 4)
+
+        f.write("\n\n--- Classifier head Dropout ---\n\n")
+        f.write(f"nn.DropOut: {model.dropout.p}")
+
+def setup_model_for_stage(model: PaligemmaForVQAClassification, stage_config):
+    """Freezes/unfreezes BLIP model parameters based on the stage configuration."""
+    print(f"--- Configuring model for stage: {stage_config['name']} ---")
+
+    # This logic assumes a "start trainable and freeze some" approach
+    # which is simpler. First, set everything to trainable.
+    for param in model.parameters():
+        param.requires_grad = True
+
+    if stage_config.get('freeze_paligemma_vision_tower', True):
+        print("Paligemma's vision tower is FROZEN.")
+        for param in model.paligemma.vision_tower.parameters():
+            param.requires_grad = False
+
+    if stage_config.get('freeze_paligemma_language_model', True):
+        print("Paligemma's language model (excluding embed-tokens) is FROZEN.")
+        for name, param in model.paligemma.language_model.named_parameters():
+            if 'embed-tokens' not in name:
+                param.requires_grad = False
+
+    if stage_config.get('freeze_embed_tokens', True):
+        print("PhoBERT transplanted word embeddings (paligemma's embed_tokens) are FROZEN.")
+        for param in model.paligemma.language_model.embed_tokens.parameters():
+            param.requires_grad = False
+
+    if stage_config.get('freeze_classifier', True):
+        print("Classifier head is FROZEN.")
+        for param in model.classifier.parameters():
+            param.requires_grad = False
+
+def create_stage_optimizer(model: PaligemmaForVQAClassification, stage_config, args):
+    """
+    Creates a staged optimizer for the Paligemma model, correctly handling both
+    differential learning rates and selective weight decay.
+    """
+    print(f"--- Creating optimizer for stage: {stage_config['name']} ---")
+    
+    no_decay_list = model.no_weight_decay()
+    print(f"Substrings for no weight decay: {no_decay_list}")
+
+    # This will be the final list of parameter groups passed to the optimizer
+    optimizer_groups = []
+    
+    # Define the components of your model and their learning rates
+    lrs = stage_config['lrs']
+    components = {
+        'paligemma_vision_tower': {'params': [], 'lr': lrs['paligemma_vision_tower']},
+        'paligemma_language_model': {'params': [], 'lr': lrs['paligemma_language_model']},
+        'embed_tokens': {'params': [], 'lr': lrs['embed_tokens']},
+        'classifier': {'params': [], 'lr': lrs['classifier']},
+    }
+
+    # 1. First, assign each parameter to its component group
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
         
+        if 'vision_tower' in name:
+            components['paligemma_vision_tower']['params'].append((name, param))
+        elif 'embed_tokens' in name:
+            components['embed_tokens']['params'].append((name, param))
+        elif 'language_model' in name:
+            components['paligemma_language_model']['params'].append((name, param))
+        elif 'classifier' in name:
+            components['classifier']['params'].append((name, param))
+
+    # 2. For each component, create final groups with and without weight decay
+    for group_name, component_data in components.items():
+        if not component_data['params']:
+            continue # Skip if a component is completely frozen
+
+        decay_params = []
+        no_decay_params = []
+        
+        # Separate the component's parameters into decay/no_decay lists
+        for name, param in component_data['params']:
+            if name.endswith(".bias") or "LayerNorm.weight" in name or any(nd in name for nd in no_decay_list):
+                no_decay_params.append(param)
+            else:
+                decay_params.append(param)
+        
+        # Create a group for parameters with weight decay
+        if decay_params:
+            optimizer_groups.append({
+                'params': decay_params,
+                'lr': component_data['lr'],
+                'weight_decay': args.weight_decay,
+                'group_base_lr': component_data['lr']
+            })
+            print(f"  - Group '{group_name}_decay' -> lr: {component_data['lr']:.1e}, wd: {args.weight_decay}")
+
+        # Create a group for parameters without weight decay
+        if no_decay_params:
+            optimizer_groups.append({
+                'params': no_decay_params,
+                'lr': component_data['lr'],
+                'weight_decay': 0.0,
+                'group_base_lr': component_data['lr']
+            })
+            print(f"  - Group '{group_name}_no_decay' -> lr: {component_data['lr']:.1e}, wd: 0.0")
+
+    # return AdamW(optimizer_groups, eps=args.opt_eps, betas=args.opt_betas)
+
+    print("Using 8-bit AdamW optimizer from bitsandbytes.")
+    # Replace the original AdamW with the 8-bit version
+    return bnb.optim.AdamW8bit(optimizer_groups, eps=args.opt_eps, betas=args.opt_betas)
+
 def train_stage(stage_config, global_epoch_start, model,
                 data_loader_train, dataset_train, 
                 data_loader_val, dataset_val,
-                optimizer, device, task_handler, args,
+                optimizer, device, task_handler: PaligemmaForVQAClassification, args,
                 # Pass metric trackers by reference (as a dict) to modify them
                 metric_trackers,
                 stage_index):
@@ -334,6 +338,8 @@ def train_stage(stage_config, global_epoch_start, model,
             pixel_values = batch["pixel_values"].to(device)
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
+            token_type_ids = batch["token_type_ids"].to(device)
+            paligemma_labels = batch["paligemma_labels"].to(device)
             labels = batch["labels"].to(device)
             qid = batch["qid"]
 
@@ -348,15 +354,17 @@ def train_stage(stage_config, global_epoch_start, model,
                     group_base_lr = param_group['group_base_lr']
                     lr_scale = lr_schedule_values[global_step_in_stage] / stage_base_lr
                     param_group["lr"] = group_base_lr * lr_scale
-            
-            if isinstance(task_handler, PaLIClassificationHandler):
-                train_stats = task_handler.train_batch(
-                    model, args.batch_size, pixel_values, input_ids, attention_mask, labels
-                )
-            elif isinstance(task_handler, PaLIHandler):
-                train_stats = task_handler.train_batch(
-                    model, dataset_train.tokenizer, pixel_values, input_ids, attention_mask, labels, qid
-                )
+
+            train_stats = task_handler.train_batch(
+                model = model,
+                input_ids = input_ids,
+                pixel_values = pixel_values,
+                attention_mask = attention_mask,
+                token_type_ids = token_type_ids,
+                paligemma_labels = paligemma_labels, # Pass to Paligemma
+                labels = labels, # Use for our classification
+                qid=None
+            )
             
             loss = train_stats["loss"]
             batch_score = train_stats["score"]
@@ -391,22 +399,22 @@ def train_stage(stage_config, global_epoch_start, model,
 
         if args.output_dir and args.save_ckpt:
             if (epoch + 1) % args.save_ckpt_freq == 0 or (epoch + 1) == args.epochs:
-                pali_save_model(args=args, epoch=epoch, model=model, optimizer=optimizer)
+                my_save_model(args=args, epoch=epoch, model=model, optimizer=optimizer)
                 
         if data_loader_val is not None:
-            test_stats = pali_evaluate(
-                data_loader_val, model, dataset_val.tokenizer, device, task_handler, batch_size=args.batch_size
+            val_stats = paligemma_evaluate(
+                data_loader_val, model, dataset_val.processor.tokenizer, device, task_handler, return_preds=False
             )
-            print(f"Performance of the network on the {len(data_loader_val)} val batches: {test_stats['score']:.1f}%")
+            print(f"Performance of the network on the {len(data_loader_val)} val batches: {val_stats['score']:.1f}%")
 
-            if metric_trackers['max_accuracy'] < test_stats['score']:
-                metric_trackers['max_accuracy'] = test_stats['score']
+            if metric_trackers['max_accuracy'] < val_stats['score']:
+                metric_trackers['max_accuracy'] = val_stats['score']
                 if args.output_dir and args.save_ckpt:
                     print(f"*** New best score! Saving model for epoch {epoch}. ***")
-                    pali_save_model(args=args, epoch=f"best-{epoch}", model=model, optimizer=optimizer)
+                    my_save_model(args=args, epoch=f"best-{epoch}", model=model, optimizer=optimizer)
             
-            current_val_score = test_stats['score']
-            current_val_loss = test_stats['loss']
+            current_val_score = val_stats['score']
+            current_val_loss = val_stats['loss']
 
             if args.early_stopping == "val_score":
                 if metric_trackers['max_accuracy_stop'] < current_val_score:
@@ -433,7 +441,7 @@ def train_stage(stage_config, global_epoch_start, model,
                          'train_score': average_score, 
                          'train_min_lr': min_lr, 
                          'train_max_lr': max_lr,
-                         **{f'val_{k}': v.item() if isinstance(v, torch.Tensor) else v for k, v in test_stats.items() if k != "prediction"},
+                         **{f'val_{k}': v.item() if isinstance(v, torch.Tensor) else v for k, v in val_stats.items() if k != "prediction"},
                          'epoch': epoch, 
                          'n_parameters': sum(p.numel() for p in model.parameters() if p.requires_grad), 
                          'time': epoch_training_time}
@@ -450,7 +458,7 @@ def train_stage(stage_config, global_epoch_start, model,
             with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
-        if metric_trackers['epochs_without_improvements'] >= args.patience and stage_index >= 2: # and average_score >= 85:
+        if metric_trackers['epochs_without_improvements'] >= args.patience: # and stage_index >= 2: # and average_score >= 85:
             print(f"No improvement in {args.patience} consecutive epochs. Early stopping stage.")
             return True # Signal to stop all training
     
@@ -458,37 +466,31 @@ def train_stage(stage_config, global_epoch_start, model,
 
 # <<< END HELPER FUNCTIONS FOR STAGED TRAINING >>>
 
+def main(args):
 
-def main(args, ds_init):
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
 
     if args.task_cache_path is None:
         args.task_cache_path = args.output_dir
 
     device = torch.device(args.device)
 
+    dtype = torch.bfloat16
+
     phobert_tokenizer = None
 
     if args.phobert:
-        phobert_tokenizer = AutoTokenizer.from_pretrained("vinai/phobert-base-v2")
+        phobert_tokenizer = PhobertTokenizer.from_pretrained("vinai/phobert-base-v2", use_fast=True)
 
-    if args.pali_class == "pali_classification":
-        if args.phobert:
-            model = PaLI_Classification_PhoBERT(
-                answer2label_path=args.answer2label,
-                device=device
-            ).to(device, non_blocking=True)
-        else:
-            model = PaLI_Classification(
-                answer2label_path=args.answer2label,
-                device=device
-            ).to(device, non_blocking=True)
+    if args.phobert:
+        model = get_vivqa_paligemma_phobert(device=device, answer2label_path=args.answer2label).to(device, non_blocking=True, dtype=dtype)
     else:
-        if args.phobert:
-            model = PaLI_PhoBERT(device=device).to(device)
-        else:
-            model = PaLI(device=device).to(device, non_blocking=True)
+        model = get_vivqa_paligemma(device = device, answer2label_path=args.answer2label).to(device, non_blocking=True, dtype=dtype)
 
-    dataset_train, data_loader_train, dataset_val, data_loader_val = create_pali_datasets(
+    model.gradient_checkpointing_enable()
+
+    dataset_train, data_loader_train, dataset_val, data_loader_val = create_paligemma_datasets(
         args,
         phobert_tokenizer=phobert_tokenizer
     )
@@ -497,89 +499,36 @@ def main(args, ds_init):
 
     print('Number of params:', n_parameters)
 
-    if args.pali_class == "pali_classification":
-        task_handler = PaLIClassificationHandler()
-    else:
-        task_handler = PaLIHandler()
-
-    log_model_config(model, args.output_dir)
+    task_handler = PaligemmaHandler()
 
     if args.eval:
-        pali_auto_resume(args, model=model, optimizer=None, device=device) # Load best checkpoint for eval
-        dataset_test, data_loader_test = create_pali_datasets(
+        my_auto_resume(args, model=model, optimizer=None, device=device) # Load best checkpoint for eval
+        dataset_test, data_loader_test = create_paligemma_datasets(
             args,
             is_eval = True,
             phobert_tokenizer = phobert_tokenizer 
         )
-        if isinstance(model, (PaLI_Classification, PaLI_Classification_PhoBERT)):
-            result = pali_evaluate(
-                data_loader_test,
-                model,
-                dataset_test.tokenizer,
-                device, 
-                task_handler,
-                True,
-                batch_size=args.batch_size)
-        elif isinstance(model, (PaLI, PaLI_PhoBERT)):
-            result = pali_evaluate(
-                data_loader_test,
-                model,
-                dataset_test.tokenizer,
-                device, task_handler,
-                True,
-                args.eval_num_beams
-            )
-        pali_dump_predictions(args, result["prediction"], "vivqa_pali_test")
+        result = paligemma_evaluate(
+            data_loader=data_loader_test,
+            model=model,
+            tokenizer=dataset_test.processor.tokenizer,
+            device=device,
+            handler=task_handler,
+            return_preds=True
+        )
+        my_dump_predictions(args, result["prediction"], "vivqa_paligemma_test")
         exit(0)
-    
-    start_time = time.time()
-    
-    # <<< START MODIFIED TRAINING LOGIC >>>
 
-    if args.staged_training:
-        print("--- Staged Training Enabled ---")
+    start_time = time.time()
+
+    log_paligemma_model_config(model, args.output_dir)
+
+    if args.staged_training and args.phobert:
         
+        print("--- Staged Training Enabled (2 Stages) ---")
+
         STAGES = [
-            {
-                'name': 'Stage 1 Train Bridge',
-                'epochs': 5,
-                'freeze_vit': True,
-                'freeze_mt5': True,
-                'freeze_mt5_head': True,
-                'freeze_word_embeddings': True,
-                'unfreeze_mt5_decoder_layers': 0,
-                'lrs': {'bridge': 1e-4, 'mt5': 0, 'vit': 0, 'mt5_head': 1e-4},
-            },
-            {
-                'name': 'Stage 2 Adapt Decoder Head',
-                'epochs': 5,
-                'freeze_vit': True,
-                'freeze_mt5': True,
-                'freeze_mt5_head': False,
-                'freeze_word_embeddings': True,
-                'unfreeze_mt5_decoder_layers': 2, # Unfreeze top 2 layers of mT5 decoder
-                'lrs': {'bridge': 5e-5, 'mt5': 2e-5, 'vit': 0, 'mt5_head': 1e-4}
-            },
-            {
-                'name': 'Stage 3 Full Fine-Tuning',
-                'epochs': 20,
-                'freeze_vit': False,
-                'freeze_mt5': False,
-                'freeze_mt5_head': False,
-                'freeze_word_embeddings': True,
-                'unfreeze_mt5_decoder_layers': 0, # ignored as freeze_mt5 is False
-                'lrs': {'bridge': 2e-5, 'mt5': 5e-6, 'vit': 5e-6, 'mt5_head': 2e-5}
-            },
-            {
-                'name': 'Stage 4 Full Fine-Tuning',
-                'epochs': 40,
-                'freeze_vit': False,
-                'freeze_mt5': False,
-                'freeze_mt5_head': False,
-                'freeze_word_embeddings': False,
-                'unfreeze_mt5_decoder_layers': 0, # ignored as freeze_mt5 is False
-                'lrs': {'bridge': 2e-5, 'mt5': 5e-6, 'vit': 5e-6, 'mt5_head': 2e-5}
-            }
+            # Add stages when use staged_training
         ]
         
         global_epoch = args.start_epoch
@@ -603,7 +552,7 @@ def main(args, ds_init):
         if args.resume != '':
             print("Creating temporary old_optimizer.")
             old_optimizer = create_stage_optimizer(model, STAGES[0], args)
-            model, old_optimizer, global_epoch = pali_auto_resume(
+            model, old_optimizer, global_epoch = my_auto_resume(
                 args, model, old_optimizer, device
             )
 
@@ -652,19 +601,29 @@ def main(args, ds_init):
         
         if assigner is not None:
             print("Assigned values = %s" % str(assigner.values))
-        
-        skip_weight_decay_list = model.no_weight_decay()
-        optimizer = create_optimizer(args, model, skip_list=skip_weight_decay_list)
-        model, optimizer, args.start_epoch = pali_auto_resume(args, model=model, optimizer=optimizer, device=device)
-        
-        log_model_architecture(model, args.output_dir, "End_to_End") # Log architecture for standard training too
 
         # Encapsulate the original loop logic into a single stage config
         stage_config = {
-            'name': 'End-to-End Training',
-            'epochs': args.epochs - args.start_epoch,
-            'lrs': {'bridge': args.lr, 'mt5': args.lr, 'vit': args.lr} # Use a single LR for scheduler
-        }
+                'name': 'Standard End-to-End Training',
+                'epochs': args.epochs,
+                'freeze_paligemma_vision_tower': True,
+                'freeze_paligemma_language_model': False,
+                'freeze_embed_tokens': args.freeze_embed_tokens,
+                'freeze_classifier': False,
+                'lrs': {
+                    'paligemma_vision_tower': 2e-5,
+                    'paligemma_language_model': 2e-5,
+                    'classifier': 2e-5,
+                    'embed_tokens': 1e-6 # <<< Use a very small LR
+                }
+            }
+
+        optimizer = create_stage_optimizer(model, stage_config, args)
+        setup_model_for_stage(model, stage_config)
+        if args.resume != '':
+            model, optimizer, args.start_epoch = my_auto_resume(args, model=model, optimizer=optimizer, device=device)
+
+        log_model_architecture(model, args.output_dir, stage_config) # Log architecture for standard training too
 
         metric_trackers = {
             'max_accuracy': 0.0,
@@ -686,7 +645,8 @@ def main(args, ds_init):
             data_loader_train, dataset_train,
             data_loader_val, dataset_val,
             optimizer, device, task_handler, args,
-            metric_trackers=metric_trackers
+            metric_trackers=metric_trackers,
+            stage_index=0
         )
 
     # <<< END MODIFIED TRAINING LOGIC >>>
@@ -696,7 +656,7 @@ def main(args, ds_init):
     print('Training time {}'.format(total_time_str))
 
 if __name__ == "__main__":
-    opts, ds_init = get_args()
+    opts = get_args()
     if opts.output_dir:
         Path(opts.output_dir).mkdir(parents=True, exist_ok=True)
-    main(opts, ds_init)
+    main(opts)

@@ -1,13 +1,3 @@
-```bash
-torchrun --nproc-per-node=1 train_pali.py \
-    --batch_size 10 \
-    --data_path /home/21khac.dd/bm/data/vivqa \
-    --output_dir /home/21khac.dd/bm/output-dir \
-    --log_dir /home/21khac.dd/bm/output-dir/output-log \
-    --resume "best" \
-    --eval \
-    --eval_num_beams 5
-```
 # PaLI-Phobert normal train
 ```bash
 torchrun --nproc-per-node=1 train_pali.py \
@@ -37,12 +27,12 @@ torchrun --nproc-per-node=1 train_pali.py \
 torchrun --nproc-per-node=1 pali_staged_training.py \
     --batch_size 8 \
     --eval_batch_size 8 \
-    --epochs 50 \
+    --epochs 70 \
     --layer_decay 1 \
     --update_freq 1 \
     --warmup_epochs 0 \
     --data_path /home/21khac.dd/bm/data/vivqa \
-    --output_dir /home/21khac.dd/bm/pali-classification-pb-4-4staged \
+    --output_dir /home/21khac.dd/bm/pali-classification-3-gemini-answer2label \
     --num_workers=10 \
     --weight_decay 0.05 \
     --save_ckpt_freq 1 \
@@ -53,9 +43,9 @@ torchrun --nproc-per-node=1 pali_staged_training.py \
     --lr_sched_type cos \
     --staged_training \
     --pali_class pali_classification \
-    --answer2label "/home/21khac.dd/bm/data/vivqa/annotations/dicts/answer2label_hand_translated.txt" \
+    --answer2label "/home/21khac.dd/bm/data/vivqa/annotations/dicts/answer2label_en_gemini_translated.txt" \
     --device "cuda:6" \
-    --phobert
+    --phobert \
     --resume "latest" \
     --no_resume_optimizer \
 
@@ -67,13 +57,28 @@ torchrun --nproc-per-node=1 pali_staged_training.py \
     --batch_size 8 \
     --eval_batch_size 8 \
     --data_path /home/21khac.dd/bm/data/vivqa \
-    --output_dir /home/21khac.dd/bm/pali-classification-pb-2-re \
+    --output_dir /home/21khac.dd/bm/pali-classification-3-gemini-answer2label \
     --resume "best" \
     --eval \
     --eval_num_beams 1 \
     --staged_training \
     --pali_class pali_classification \
-    --answer2label "/home/21khac.dd/bm/data/vivqa/annotations/dicts/answer2label_hand_translated.txt" \
-    --device "cuda:7" \
+    --answer2label "/home/21khac.dd/bm/data/vivqa/annotations/dicts/answer2label_en_gemini_translated.txt" \
+    --device "cuda:5" \
+    --phobert
+```
+
+```bash
+torchrun --nproc-per-node=1 pali_staged_training.py \
+    --batch_size 8 \
+    --eval_batch_size 8 \
+    --data_path /home/21khac.dd/bm/data/vivqa \
+    --output_dir /home/21khac.dd/bm/pali-pb-4 \
+    --resume "best" \
+    --eval \
+    --eval_num_beams 1 \
+    --staged_training \
+    --pali_class pali_generative \
+    --device "cuda:5" \
     --phobert
 ```

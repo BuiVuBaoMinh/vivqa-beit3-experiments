@@ -246,8 +246,8 @@ class PaLI_Classification(nn.Module):
         print(f"PaLI_Classification: num_labels = {num_labels}")
 
         self.vit_config = ViTConfig.from_pretrained(vit_model_name)
-        # self.vit_config.hidden_dropout_prob = 0.2
-        # self.vit_config.attention_probs_dropout_prob = 0.1
+        self.vit_config.hidden_dropout_prob = 0.2
+        self.vit_config.attention_probs_dropout_prob = 0.1
         self.vit = ViTModel.from_pretrained(
             pretrained_model_name_or_path=vit_model_name,
             config = self.vit_config
@@ -259,16 +259,16 @@ class PaLI_Classification(nn.Module):
             id2label = self.label2answer,
             label2id = self.answer2label,
         )
-        # self.mt5_config.dropout_rate = 0.3
-        # self.mt5_config.classifier_dropout = 0.1
+        self.mt5_config.dropout_rate = 0.3
+        self.mt5_config.classifier_dropout = 0.1
         self.mt5 = MT5ForSequenceClassification.from_pretrained(
             pretrained_model_name_or_path = text_component_model_name,
             config = self.mt5_config
         )
 
         self.vision_proj = nn.Linear(self.vit.config.hidden_size, self.mt5.config.d_model) # Project to match mT5, to train fusion
-        # self.vision_dropout = nn.Dropout(p=0.2) # add regularizing effect to vision_proj, 0.1 is initial value
-        self.vision_dropout = nn.Dropout(p=0.5)
+        self.vision_dropout = nn.Dropout(p=0.2) # add regularizing effect to vision_proj, 0.1 is initial value
+        # self.vision_dropout = nn.Dropout(p=0.5)
         self.vision_layernorm = nn.LayerNorm(self.mt5.config.d_model) # may stablilize fusion?
         self.device = device
 
@@ -348,11 +348,11 @@ class PaLI_Classification(nn.Module):
                 item = json.loads(line.strip())
 
                 label = item['label']
-                answer = item['answer']
+                answer = segment_normalize(item['answer'])
 
                 label2answer[label] = answer
 
-                if item['answer'] in seen_answers:
+                if answer in seen_answers:
                     continue  # Skip duplicates
                 seen_answers.add(answer)
                 unique_answers.append(answer)

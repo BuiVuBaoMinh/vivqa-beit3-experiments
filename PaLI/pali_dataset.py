@@ -120,7 +120,7 @@ class ViVQAPaLIClassificationDataset(torch.utils.data.Dataset):
         with open(file_path, 'r', encoding='utf-8') as f:
             for line in f:
                 item = json.loads(line.strip())
-                answer = remove_under_score(item['answer'])
+                answer = segment_normalize(item['answer'])
                 label_to_answer[item['label']] = answer
 
                 if answer in seen_answers:
@@ -130,8 +130,8 @@ class ViVQAPaLIClassificationDataset(torch.utils.data.Dataset):
 
                 answer_to_label[answer] = item['label']
 
-        # assert len(answer_to_label) == len(label_to_answer), \
-        #     f"answer_to_label and label_to_answer dicts mismatch {len(answer_to_label)} vs {len(label_to_answer)}!"
+        assert len(answer_to_label) == len(label_to_answer), \
+            f"answer_to_label and label_to_answer dicts mismatch {len(answer_to_label)} vs {len(label_to_answer)}!"
 
         if len(answer_to_label) != len(label_to_answer):
             print(f"Warning: answer_to_label and label_to_answer dicts mismatch {len(answer_to_label)} vs {len(label_to_answer)}!")
@@ -173,10 +173,6 @@ class ViVQAPaLIClassificationDataset(torch.utils.data.Dataset):
         label = self.answer_to_label.get(answer_str, len(self.answer_to_label)-1) # Default to "UNKNOWN" if answer not in map
         if label == len(self.answer_to_label)-1:
             print(f"Warning: Answer '{answer_str}' for qid {qid} not found in answer map. Returning label {len(self.answer_to_label)-1}: {self.label_to_answer[len(self.answer_to_label)-1]}.")
-
-        # label = self.answer_to_label.get(answer_str, 0) # Default to "0" if answer not in map
-        # if label == 0 and answer_str != "bowl":
-        #     print(f"Warning: Answer '{answer_str}' for qid {qid} not found in answer map. Returning label 0.")
 
         return {
             "qid": qid,
