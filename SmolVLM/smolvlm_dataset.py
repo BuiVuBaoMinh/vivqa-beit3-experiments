@@ -5,15 +5,14 @@ import sys
 
 from PIL import Image
 from transformers import (
-    Idefics3Processor, Idefics3ForConditionalGeneration, Idefics3Model, 
-    SmolVLMConfig, SmolVLMForConditionalGeneration, SmolVLMModel, SmolVLMPreTrainedModel, SmolVLMProcessor,
-    PhobertTokenizer, RobertaModel
+    SmolVLMProcessor, SmolVLMImageProcessor,
+    PhobertTokenizer, AutoTokenizer, AutoProcessor
 )
 from torch.utils.data import DataLoader
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from mySmolVLM import SMOLVLM_500M_MODEL_ID
+from mySmolVLM import SMOLVLM_ID, SMOLVLM_2B_MODEL_ID
 
 import utils
 from glossary import segment_normalize
@@ -22,7 +21,7 @@ from glossary import segment_normalize
 def remove_under_score(text: str):
     return text.replace("_", " ")
 
-class ViVQASmolVLMProcessor(Idefics3Processor):
+class ViVQASmolVLMProcessor(SmolVLMProcessor):
     tokenizer_class = ("AutoTokenizer", "PhobertTokenizer")
 
     def __init__(self, image_processor, tokenizer, **kwargs):
@@ -32,7 +31,7 @@ class ViVQASmolVLMDataset(torch.utils.data.Dataset):
     def __init__(self,
                  args,
                  json_path, image_dir, split,
-                 smolvlm_model_id=SMOLVLM_500M_MODEL_ID,
+                 smolvlm_model_id=SMOLVLM_ID,
                  phobert_tokenizer: PhobertTokenizer = None):
         
         with open(json_path, "r", encoding="utf-8") as f:
@@ -43,7 +42,12 @@ class ViVQASmolVLMDataset(torch.utils.data.Dataset):
 
         self.image_dir = image_dir
 
-        self.processor = Idefics3Processor.from_pretrained(smolvlm_model_id, use_fast=True)
+        self.processor = SmolVLMProcessor.from_pretrained(smolvlm_model_id, use_fast=True)
+        # self.processor = AutoProcessor.from_pretrained(smolvlm_model_id, use_fast=True)
+
+        self.processor.image_processor.do_resize = True
+        # self.processor.image_processor.size = {"longest_edge": 2 * 384}
+        # self.processor.image_processor.max_image_size = {"longest_edge": 384}
 
         if args.phobert and phobert_tokenizer is not None:
             tokens_to_add = {
@@ -51,6 +55,7 @@ class ViVQASmolVLMDataset(torch.utils.data.Dataset):
                     self.processor.fake_image_token,
                     self.processor.image_token,
                     self.processor.end_of_utterance_token,
+                    self.processor.global_image_token
                 ]
             }
             phobert_tokenizer.add_special_tokens(tokens_to_add)
@@ -59,13 +64,18 @@ class ViVQASmolVLMDataset(torch.utils.data.Dataset):
 
             image_token_id = phobert_tokenizer.convert_tokens_to_ids(self.processor.image_token)
             fake_image_token_id = phobert_tokenizer.convert_tokens_to_ids(self.processor.fake_image_token)
-            end_of_utterance_token = phobert_tokenizer.convert_tokens_to_ids(self.processor.end_of_utterance_token)
+            end_of_utterance_token_id = phobert_tokenizer.convert_tokens_to_ids(self.processor.end_of_utterance_token)
+            
             print(f"Added {self.processor.image_token} token to PhobertTokenizer with new ID: {image_token_id}")
             print(f"Added {self.processor.fake_image_token} token to PhobertTokenizer with new ID: {fake_image_token_id}")
-            print(f"Added {self.processor.end_of_utterance_token} token to PhobertTokenizer with new ID: {end_of_utterance_token}")
+            print(f"Added {self.processor.end_of_utterance_token} token to PhobertTokenizer with new ID: {end_of_utterance_token_id}")
+            if isinstance(self.processor, SmolVLMProcessor):
+                global_image_token_id = phobert_tokenizer.convert_tokens_to_ids(self.processor.global_image_token)
+                print(f"Added {self.processor.global_image_token} token to PhobertTokenizer with new ID: {global_image_token_id}")
+
 
         self.split = split
-        self.max_length = 1282
+        self.max_length = 512
     
     def __len__(self):
         return len(self.data)
@@ -145,7 +155,7 @@ class ViVQASmolVLMDataset(torch.utils.data.Dataset):
         return len(self.data)
     
 
-def create_smolvlm_dataloader(dataset, is_train, batch_size, num_workers, pin_mem, dist_eval=False):
+def create_smolvlm_dataloader(dataset, is_train, batch_size, num_workers, pin_mem, device, dist_eval=False):
     if is_train:
         sampler = torch.utils.data.RandomSampler(dataset)
     else:
@@ -165,7 +175,7 @@ def create_smolvlm_dataloader(dataset, is_train, batch_size, num_workers, pin_me
         collate_fn=collate_fn,
     )
 
-def create_smolvlm_dataset_by_split(args, split, is_train=True, phobert_tokenizer=None):
+def create_smolvlm_dataset_by_split(args, split, is_train=True, phobert_tokenizer=None, device=None):
     en_json_suffix = 'en'
     vi_json_suffix = 'vi_en_ans'
 
@@ -181,7 +191,7 @@ def create_smolvlm_dataset_by_split(args, split, is_train=True, phobert_tokenize
         json_path=json_path,
         image_dir=image_dir,
         split=split,
-        smolvlm_model_id=SMOLVLM_500M_MODEL_ID,
+        smolvlm_model_id=SMOLVLM_ID,
         phobert_tokenizer=phobert_tokenizer
     )
 
@@ -194,20 +204,20 @@ def create_smolvlm_dataset_by_split(args, split, is_train=True, phobert_tokenize
 
     data_loader = create_smolvlm_dataloader(
         dataset, is_train=is_train, batch_size=batch_size, 
-        num_workers=args.num_workers, pin_mem=args.pin_mem, dist_eval=args.dist_eval, 
+        num_workers=args.num_workers, pin_mem=args.pin_mem, dist_eval=args.dist_eval, device=device,
     )
     
     return dataset, data_loader
 
-def create_smolvlm_datasets(args, is_eval=False, phobert_tokenizer=None):
+def create_smolvlm_datasets(args, is_eval=False, phobert_tokenizer=None, device=None):
     if is_eval:
-        return create_smolvlm_dataset_by_split(args, split="test", is_train=False, phobert_tokenizer=phobert_tokenizer)
+        return create_smolvlm_dataset_by_split(args, split="test", is_train=False, phobert_tokenizer=phobert_tokenizer, device=device)
     else:
         dataset_train, data_loader_train =create_smolvlm_dataset_by_split(
-            args, split="train", is_train=True, phobert_tokenizer=phobert_tokenizer
+            args, split="train", is_train=True, phobert_tokenizer=phobert_tokenizer, device=device
         )
         dataset_val, data_loader_val = create_smolvlm_dataset_by_split(
-            args, split="val", is_train=True, phobert_tokenizer=phobert_tokenizer
+            args, split="val", is_train=True, phobert_tokenizer=phobert_tokenizer, device=device
         )
         return dataset_train, data_loader_train, dataset_val, data_loader_val
 
@@ -220,7 +230,7 @@ def smolvlm_collate_fn(batch, processor):
     The definitive collate function that processes an entire batch at once.
     """
     # Extract images and questions from the batch
-    images = [item['image'] for item in batch]
+    images = [[item['image']] for item in batch]
     questions = [item['question'] for item in batch]
     
     # Process the entire batch of images and questions at once
@@ -229,12 +239,43 @@ def smolvlm_collate_fn(batch, processor):
         images=images, 
         return_tensors="pt", 
         padding=True, # Pad text to the longest in the batch
-        truncation=True,
-        max_length=1282
+        truncation=False,
+        max_length=512
     )
 
     # Gather labels and qids
     inputs['labels'] = torch.tensor([item['labels'] for item in batch], dtype=torch.long)
     inputs['qid'] = [item['qid'] for item in batch]
     
+    return inputs
+
+def smolvlm_collate_fn_2(batch, processor):
+    """
+    The definitive collate function that processes an entire batch at once by
+    separating text and vision processing. This is more robust and avoids
+    issues with the main processor's batch handling and truncation logic.
+    """
+    # Extract images and questions from the batch
+    images = [item['image'] for item in batch]
+    questions = [item['question'] for item in batch]
+
+    text_inputs = processor.tokenizer(
+        text=questions,
+        return_tensors="pt",
+        padding="True",
+        truncation=False,
+        max_length=512
+    )
+
+    # 2. Process all image inputs in a single batch call.
+    vision_inputs = processor.image_processor(
+        images=images,
+        return_tensors="pt"
+    )
+
+    inputs = {**text_inputs, **vision_inputs}
+
+    inputs['labels'] = torch.tensor([item['labels'] for item in batch], dtype=torch.long)
+    inputs['qid'] = [item['qid'] for item in batch]
+
     return inputs

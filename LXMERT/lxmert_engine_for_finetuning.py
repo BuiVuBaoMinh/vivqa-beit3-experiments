@@ -13,7 +13,7 @@ from timm.utils import ModelEma
 
 import utils
 
-class SmolVLMHandler(object):
+class BLIPHandler(object):
     """
     Handles training and evaluation for a PaLI-based classification model.
     Uses Accuracy as the primary metric and avoids slow text generation during evaluation.
@@ -23,16 +23,7 @@ class SmolVLMHandler(object):
         self.predictions = []
         self.id2label = None # Will be populated with the mapping from the dataset
 
-    def train_batch(
-        self,
-        model,
-        input_ids,
-        pixel_values,
-        attention_mask,
-        pixel_attention_mask,
-        labels, # Use for our classification
-        qid=None
-    ):
+    def train_batch(self, model, pixel_values, input_ids, attention_mask, labels, qid=None):
         """
         Performs a single training step.
         """
@@ -42,14 +33,20 @@ class SmolVLMHandler(object):
             print(f"Labels: {labels.cpu().tolist()}")
             print(f"Model labels: 0..{len(model.label2answer)}")
             raise ValueError("Label out of bounds for logits")
-        
+
+        # Check shapes and types before forward pass
+        # print(">>> Debug: pixel_values shape =", pixel_values.shape)
+        # print(">>> Debug: input_ids shape =", input_ids.shape)
+        # print(">>> Debug: attention_mask shape =", attention_mask.shape)
+        # print(">>> Debug: labels shape =", labels.shape)
+        # print(">>> Debug: labels dtype =", labels.dtype)
+
         try:
             # Get model output from a single forward pass
             outputs = model(
-                input_ids = input_ids,
-                pixel_values = pixel_values,
-                attention_mask = attention_mask,
-                pixel_attention_mask = pixel_attention_mask,
+                input_ids=input_ids,
+                pixel_values=pixel_values,
+                attention_mask=attention_mask,
                 labels=labels,
             )
 
@@ -59,7 +56,10 @@ class SmolVLMHandler(object):
             if torch.isnan(loss) or torch.isinf(loss):
                 print(">>> Warning: NaN or Inf in loss!")
                 raise ValueError("Loss is NaN or Inf")
-            
+
+            # Check for logits shape
+            # print(">>> Debug: logits shape =", outputs.logits.shape)
+
             # Get predictions by finding the class with the highest logit
             pred_ids = torch.argmax(outputs.logits, dim=-1)
 
@@ -88,20 +88,19 @@ class SmolVLMHandler(object):
         self.id2label = data_loader.dataset.label_to_answer
 
 
-    def eval_batch(
-        self, 
-        model, 
-        batch_size, 
-        pixel_values, 
-        input_ids, 
-        attention_mask, 
-        pixel_attention_mask,
-        labels, 
-        qid
-    ):
+    def eval_batch(self, model, batch_size, pixel_values, input_ids, attention_mask, labels, qid):
         """
         Performs a single evaluation step for one batch.
         """
+
+        # Check shapes and types before forward pass
+        # print(">>> Debug: batch_size =", batch_size)
+        # print(">>> Debug: pixel_values shape =", pixel_values.shape)
+        # print(">>> Debug: input_ids shape =", input_ids.shape)
+        # print(">>> Debug: attention_mask shape =", attention_mask.shape)
+        # print(">>> Debug: labels shape =", labels.shape)
+        # print(">>> Debug: labels dtype =", labels.dtype)
+
         
         if torch.any(labels < 0) or torch.any(labels > len(model.label2answer)-1):
             print(f"Invalid labels detected WHILE EVALUATING! Min: {labels.min().item()}, Max: {labels.max().item()}")
@@ -110,11 +109,10 @@ class SmolVLMHandler(object):
             raise ValueError("Label out of bounds for logits")
 
         outputs = model(
-            input_ids = input_ids,
-            pixel_values = pixel_values,
-            attention_mask = attention_mask,
-            pixel_attention_mask = pixel_attention_mask,
-            labels = labels,
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+            attention_mask=attention_mask,
+            labels=labels,
         )
         
         loss = outputs.loss
@@ -134,7 +132,7 @@ class SmolVLMHandler(object):
         for question_id, predicted_id in zip(qid, pred_ids):
             pred_answer = self.id2label.get(predicted_id.item(), "[UNK]") # Failsafe
             self.predictions.append({
-                "question_id": question_id,
+                "question_id": question_id.item(),
                 "answer": pred_answer
             })
             
@@ -153,7 +151,7 @@ class SmolVLMHandler(object):
         return results
     
 @torch.no_grad()
-def smolvlm_evaluate(args, data_loader, model, tokenizer, device, handler: SmolVLMHandler, return_preds: bool = True):
+def blip_evaluate(data_loader, model, tokenizer, device, handler: BLIPHandler, return_preds: bool = True):
     metric_logger = utils.MetricLogger(delimiter="  ")
 
     # switch to evaluation mode
@@ -161,21 +159,18 @@ def smolvlm_evaluate(args, data_loader, model, tokenizer, device, handler: SmolV
     handler.before_eval(metric_logger=metric_logger, data_loader=data_loader)
 
     for step, batch in enumerate(tqdm(data_loader, desc=f"Test: ", leave=False)):
-        # TODO: Edit dtype according to model's dtype
-        pixel_values = batch["pixel_values"].to(device=device, dtype=torch.bfloat16)
-        input_ids = batch["input_ids"].to(device=device)
-        attention_mask = batch["attention_mask"].to(device=device)
-        pixel_attention_mask = batch["pixel_attention_mask"].to(device=device)
+        pixel_values = batch["pixel_values"].to(device)
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
         labels = batch["labels"].to(device)
         qid = batch["qid"]
 
         handler.eval_batch(
             model=model,
-            batch_size=args.eval_batch_size,
+            batch_size=8,
             pixel_values=pixel_values,
             input_ids=input_ids,
             attention_mask=attention_mask,
-            pixel_attention_mask=pixel_attention_mask,
             labels=labels,
             qid=qid
         )

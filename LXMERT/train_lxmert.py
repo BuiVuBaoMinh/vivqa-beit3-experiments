@@ -14,21 +14,21 @@ from torch.utils.data import DataLoader
 import torch
 from torch.optim import AdamW
 from transformers import PhobertTokenizer
-import bitsandbytes as bnb
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from mySmolVLM import get_vivqa_smolvlm, get_vivqa_smolvlm_phobert, SmolVLMForVQAClassification
-from smolvlm_dataset import create_smolvlm_datasets
+from myBLIP import get_vivqa_blip, get_vivqa_blip_phobert, BlipForVQAClassification
+from blip_dataset import create_blip_datasets
 from my_utils import TrainingF1Score, my_dump_predictions, my_save_model, my_auto_resume
-from smolvlm_engine_for_finetuning import SmolVLMHandler, smolvlm_evaluate
+from BLIP_engine_for_finetuning import BLIPHandler, blip_evaluate
 
 import utils
 from optim_factory import create_optimizer, LayerDecayValueAssigner, get_is_head_flag_for_vit
 
 
+
 def get_args():
-    parser = argparse.ArgumentParser('Paligemma fine-tuning and evaluation script for image classification', add_help=False)
+    parser = argparse.ArgumentParser('BLIP fine-tuning and evaluation script for image classification', add_help=False)
 
     # Optimizer parameters
     parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
@@ -111,8 +111,8 @@ def get_args():
                         help="Determine the early stopping criteria. Supports val_score and val_loss")
     parser.add_argument('--staged_training', action='store_true', default=False,
                         help="Enable 3-stage gradual unfreezing training.")
-    parser.add_argument('--freeze_embed_tokens', action='store_true', default=False,
-                        help="Freeze SmolVLM's text_model(LLama)'s embed_tokens.")
+    parser.add_argument('--freeze_word_embeddings', action='store_true', default=False,
+                        help="Freeze word embedding.")
     
     # Custom resume args
     parser.add_argument('--no_resume_optimizer', action="store_true", default=False,
@@ -170,22 +170,19 @@ def get_resume_stage_index(global_epoch, stages):
         if cnt > global_epoch:
             return i  
         
-def log_smolvlm_model_config(model: SmolVLMForVQAClassification, output_dir):
+def log_blip_model_config(model, output_dir):
     outfile = os.path.join(output_dir, f"model_config.txt")
     with open(outfile, "w") as f:
-        f.write(f"--- SmolVLM Text Model Config ---")
-        json.dump(model.smolvlm.text_model.config.to_dict(), f,  indent = 4)
+        f.write(f"--- BLIP Text-model Config ---")
+        json.dump(model.blip.text_model.config.to_dict(), f,  indent = 4)
         
-        f.write("\n\n--- SmolVLM Vision Model Config ---")
-        json.dump(model.smolvlm.vision_model.config.to_dict(), f, indent = 4)
-
-        f.write("\n\n--- SmolVLM Model Config ---")
-        json.dump(model.smolvlm.config.to_dict(), f, indent = 4)
+        f.write("\n\n--- BLIP vision model Config ---\n\n")
+        json.dump(model.blip.vision_model.config.to_dict(), f, indent = 4)
 
         f.write("\n\n--- Classifier head Dropout ---\n\n")
         f.write(f"nn.DropOut: {model.dropout.p}")
 
-def setup_model_for_stage(model: SmolVLMForVQAClassification, stage_config):
+def setup_model_for_stage(model: BlipForVQAClassification, stage_config):
     """Freezes/unfreezes BLIP model parameters based on the stage configuration."""
     print(f"--- Configuring model for stage: {stage_config['name']} ---")
 
@@ -194,20 +191,20 @@ def setup_model_for_stage(model: SmolVLMForVQAClassification, stage_config):
     for param in model.parameters():
         param.requires_grad = True
 
-    if stage_config.get('freeze_smolvlm_vision_model', True):
-        print("SmolVLM's vision model is FROZEN.")
-        for param in model.smolvlm.vision_model.parameters():
+    if stage_config.get('freeze_blip_vision_model', True):
+        print("BLIP vision model is FROZEN.")
+        for param in model.blip.vision_model.parameters():
             param.requires_grad = False
 
-    if stage_config.get('freeze_smolvlm_text_model', True):
-        print("SmolVLM's text model (excluding embed-tokens) is FROZEN.")
-        for name, param in model.smolvlm.text_model.named_parameters():
-            if 'embed-tokens' not in name:
+    if stage_config.get('freeze_blip_text_model', True):
+        print("Text model (excluding embeddings) is FROZEN.")
+        for name, param in model.blip.text_model.named_parameters():
+            if 'word_embeddings' not in name:
                 param.requires_grad = False
 
-    if stage_config.get('freeze_embed_tokens', True):
-        print("PhoBERT transplanted word embeddings (SmolVLM's embed_tokens) are FROZEN.")
-        for param in model.smolvlm.text_model.embed_tokens.parameters():
+    if stage_config.get('freeze_word_embeddings', True):
+        print("PhoBERT transplanted word embeddings are FROZEN.")
+        for param in model.blip.text_model.embeddings.word_embeddings.parameters():
             param.requires_grad = False
 
     if stage_config.get('freeze_classifier', True):
@@ -215,9 +212,9 @@ def setup_model_for_stage(model: SmolVLMForVQAClassification, stage_config):
         for param in model.classifier.parameters():
             param.requires_grad = False
 
-def create_stage_optimizer(model: SmolVLMForVQAClassification, stage_config, args):
+def create_stage_optimizer(model: BlipForVQAClassification, stage_config, args):
     """
-    Creates a staged optimizer for the SmolVLM model, correctly handling both
+    Creates a staged optimizer for the BLIP model, correctly handling both
     differential learning rates and selective weight decay.
     """
     print(f"--- Creating optimizer for stage: {stage_config['name']} ---")
@@ -231,9 +228,9 @@ def create_stage_optimizer(model: SmolVLMForVQAClassification, stage_config, arg
     # Define the components of your model and their learning rates
     lrs = stage_config['lrs']
     components = {
-        'smolvlm_vision_model': {'params': [], 'lr': lrs['smolvlm_vision_model']},
-        'smolvlm_text_model': {'params': [], 'lr': lrs['smolvlm_text_model']},
-        'embed_tokens': {'params': [], 'lr': lrs['embed_tokens']},
+        'blip_vision_model': {'params': [], 'lr': lrs['blip_vision_model']},
+        'blip_text_model': {'params': [], 'lr': lrs['blip_text_model']},
+        'word_embeddings': {'params': [], 'lr': lrs['word_embeddings']},
         'classifier': {'params': [], 'lr': lrs['classifier']},
     }
 
@@ -243,11 +240,11 @@ def create_stage_optimizer(model: SmolVLMForVQAClassification, stage_config, arg
             continue
         
         if 'vision_model' in name:
-            components['smolvlm_vision_model']['params'].append((name, param))
-        elif 'embed_tokens' in name:
-            components['embed_tokens']['params'].append((name, param))
+            components['blip_vision_model']['params'].append((name, param))
+        elif 'word_embeddings' in name:
+            components['word_embeddings']['params'].append((name, param))
         elif 'text_model' in name:
-            components['smolvlm_text_model']['params'].append((name, param))
+            components['blip_text_model']['params'].append((name, param))
         elif 'classifier' in name:
             components['classifier']['params'].append((name, param))
 
@@ -286,16 +283,12 @@ def create_stage_optimizer(model: SmolVLMForVQAClassification, stage_config, arg
             })
             print(f"  - Group '{group_name}_no_decay' -> lr: {component_data['lr']:.1e}, wd: 0.0")
 
-    # return AdamW(optimizer_groups, eps=args.opt_eps, betas=args.opt_betas)
-
-    print("Using 8-bit AdamW optimizer from bitsandbytes.")
-    # Replace the original AdamW with the 8-bit version
-    return bnb.optim.AdamW8bit(optimizer_groups, eps=args.opt_eps, betas=args.opt_betas)
+    return AdamW(optimizer_groups, eps=args.opt_eps, betas=args.opt_betas)
 
 def train_stage(stage_config, global_epoch_start, model,
                 data_loader_train, dataset_train, 
                 data_loader_val, dataset_val,
-                optimizer, device, task_handler: SmolVLMForVQAClassification, args,
+                optimizer, device, task_handler: BLIPHandler, args,
                 # Pass metric trackers by reference (as a dict) to modify them
                 metric_trackers,
                 stage_index):
@@ -335,11 +328,10 @@ def train_stage(stage_config, global_epoch_start, model,
         for step, batch in enumerate(tqdm(data_loader_train, desc=f"Epoch {epoch}", leave=False)):
             optimizer.zero_grad()
 
-            pixel_values = batch["pixel_values"].to(device=device, dtype=torch.bfloat16)
-            input_ids = batch["input_ids"].to(device=device)
-            attention_mask = batch["attention_mask"].to(device=device)
-            pixel_attention_mask = batch["pixel_attention_mask"].to(device=device)
-            labels = batch["labels"].to(device=device)
+            pixel_values = batch["pixel_values"].to(device)
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
             qid = batch["qid"]
 
             # Scheduler step calculation needs to be relative to the stage
@@ -355,14 +347,8 @@ def train_stage(stage_config, global_epoch_start, model,
                     param_group["lr"] = group_base_lr * lr_scale
 
             train_stats = task_handler.train_batch(
-                model = model,
-                input_ids = input_ids,
-                pixel_values = pixel_values,
-                attention_mask = attention_mask,
-                pixel_attention_mask = pixel_attention_mask,
-                labels = labels, # Use for our classification
-                qid = None
-            )
+                    model, pixel_values, input_ids, attention_mask, labels, qid
+                )
             
             loss = train_stats["loss"]
             batch_score = train_stats["score"]
@@ -400,19 +386,19 @@ def train_stage(stage_config, global_epoch_start, model,
                 my_save_model(args=args, epoch=epoch, model=model, optimizer=optimizer)
                 
         if data_loader_val is not None:
-            val_stats = smolvlm_evaluate(
-                args, data_loader_val, model, dataset_val.processor.tokenizer, device, task_handler, return_preds=False
+            test_stats = blip_evaluate(
+                data_loader_val, model, dataset_val.processor.tokenizer, device, task_handler
             )
-            print(f"Performance of the network on the {len(data_loader_val)} val batches: {val_stats['score']:.1f}%")
+            print(f"Performance of the network on the {len(data_loader_val)} val batches: {test_stats['score']:.1f}%")
 
-            if metric_trackers['max_accuracy'] < val_stats['score']:
-                metric_trackers['max_accuracy'] = val_stats['score']
+            if metric_trackers['max_accuracy'] < test_stats['score']:
+                metric_trackers['max_accuracy'] = test_stats['score']
                 if args.output_dir and args.save_ckpt:
                     print(f"*** New best score! Saving model for epoch {epoch}. ***")
                     my_save_model(args=args, epoch=f"best-{epoch}", model=model, optimizer=optimizer)
             
-            current_val_score = val_stats['score']
-            current_val_loss = val_stats['loss']
+            current_val_score = test_stats['score']
+            current_val_loss = test_stats['loss']
 
             if args.early_stopping == "val_score":
                 if metric_trackers['max_accuracy_stop'] < current_val_score:
@@ -439,7 +425,7 @@ def train_stage(stage_config, global_epoch_start, model,
                          'train_score': average_score, 
                          'train_min_lr': min_lr, 
                          'train_max_lr': max_lr,
-                         **{f'val_{k}': v.item() if isinstance(v, torch.Tensor) else v for k, v in val_stats.items() if k != "prediction"},
+                         **{f'val_{k}': v.item() if isinstance(v, torch.Tensor) else v for k, v in test_stats.items() if k != "prediction"},
                          'epoch': epoch, 
                          'n_parameters': sum(p.numel() for p in model.parameters() if p.requires_grad), 
                          'time': epoch_training_time}
@@ -466,49 +452,40 @@ def train_stage(stage_config, global_epoch_start, model,
 
 def main(args):
 
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
-
     if args.task_cache_path is None:
         args.task_cache_path = args.output_dir
 
     device = torch.device(args.device)
 
-    dtype = torch.bfloat16
-
     phobert_tokenizer = None
 
     if args.phobert:
-        phobert_tokenizer = PhobertTokenizer.from_pretrained("vinai/phobert-base-v2", use_fast=True)
+        phobert_tokenizer = PhobertTokenizer.from_pretrained("vinai/phobert-base-v2")
 
     if args.phobert:
-        model = get_vivqa_smolvlm_phobert(device=device, answer2label_path=args.answer2label).to(device, non_blocking=True, dtype=dtype)
+        model = get_vivqa_blip_phobert(device=device, answer2label_path=args.answer2label).to(device, non_blocking=True)
     else:
-        model = get_vivqa_smolvlm(device = device, answer2label_path=args.answer2label).to(device, non_blocking=True, dtype=dtype)
+        model = get_vivqa_blip(device = device, answer2label_path=args.answer2label).to(device, non_blocking=True)
 
-    # model.gradient_checkpointing_enable()
-
-    dataset_train, data_loader_train, dataset_val, data_loader_val = create_smolvlm_datasets(
+    dataset_train, data_loader_train, dataset_val, data_loader_val = create_blip_datasets(
         args,
-        phobert_tokenizer=phobert_tokenizer,
-        device=device
+        phobert_tokenizer=phobert_tokenizer
     )
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     print('Number of params:', n_parameters)
 
-    task_handler = SmolVLMHandler()
+    task_handler = BLIPHandler()
 
     if args.eval:
         my_auto_resume(args, model=model, optimizer=None, device=device) # Load best checkpoint for eval
-        dataset_test, data_loader_test = create_smolvlm_datasets(
+        dataset_test, data_loader_test = create_blip_datasets(
             args,
             is_eval = True,
             phobert_tokenizer = phobert_tokenizer 
         )
-        result = smolvlm_evaluate(
-            args,
+        result = blip_evaluate(
             data_loader=data_loader_test,
             model=model,
             tokenizer=dataset_test.processor.tokenizer,
@@ -516,19 +493,46 @@ def main(args):
             handler=task_handler,
             return_preds=True
         )
-        my_dump_predictions(args, result["prediction"], "vivqa_smolvlm_test")
+        my_dump_predictions(args, result["prediction"], "vivqa_blip_test")
         exit(0)
 
     start_time = time.time()
 
-    log_smolvlm_model_config(model, args.output_dir)
+    log_blip_model_config(model, args.output_dir)
 
     if args.staged_training and args.phobert:
         
         print("--- Staged Training Enabled (2 Stages) ---")
 
         STAGES = [
-            # Add stages when use staged_training
+            {
+                'name': 'Stage 1 - Train Backbones (Embeddings Frozen)',
+                'epochs': 5,  # Give it ample time to adapt
+                'freeze_blip_vision_model': False,
+                'freeze_blip_text_model': False,
+                'freeze_word_embeddings': True,  # <<< THE KEY
+                'freeze_classifier': False,
+                'lrs': {
+                    'blip_vision_model': 5e-6,
+                    'blip_text_model': 5e-6,
+                    'classifier': 2e-5,
+                    'word_embeddings': 0  # Explicitly 0 LR
+                }
+            },
+            {
+                'name': 'Stage 2 - Fine-tune Embeddings (Full End-to-End)',
+                'epochs': 15,  # Final polishing stage
+                'freeze_blip_vision_model': False,
+                'freeze_blip_text_model': False,
+                'freeze_word_embeddings': False, # <<< UNFREEZE
+                'freeze_classifier': False,
+                'lrs': {
+                    'blip_vision_model': 2e-5,
+                    'blip_text_model': 2e-5,
+                    'classifier': 1e-5,
+                    'word_embeddings': 1e-6 # <<< Use a very small LR
+                }
+            }
         ]
         
         global_epoch = args.start_epoch
@@ -606,15 +610,15 @@ def main(args):
         stage_config = {
                 'name': 'Standard End-to-End Training',
                 'epochs': args.epochs,
-                'freeze_smolvlm_vision_model': True,
-                'freeze_smolvlm_text_model': False,
-                'freeze_embed_tokens': args.freeze_embed_tokens,
+                'freeze_blip_vision_model': True,
+                'freeze_blip_text_model': False,
+                'freeze_word_embeddings': args.freeze_word_embeddings,
                 'freeze_classifier': False,
                 'lrs': {
-                    'smolvlm_vision_model': 2e-5,
-                    'smolvlm_text_model': 2e-5,
+                    'blip_vision_model': 2e-5,
+                    'blip_text_model': 2e-5,
                     'classifier': 2e-5,
-                    'embed_tokens': 5e-6# <<< Use a very small LR
+                    'word_embeddings': 1e-6 # <<< Use a very small LR
                 }
             }
 

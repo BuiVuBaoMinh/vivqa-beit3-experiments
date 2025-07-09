@@ -5,9 +5,10 @@ import os
 import torch
 import torch.nn as nn
 from transformers import (
-    Idefics3Processor, Idefics3ForConditionalGeneration, Idefics3Model, Idefics3Config,
+    Idefics3Processor,
+    VisualBertForQuestionAnswering, LxmertForQuestionAnswering,
     LlamaModel,
-    SmolVLMConfig, SmolVLMForConditionalGeneration, SmolVLMModel, SmolVLMPreTrainedModel,
+    SmolVLMConfig, SmolVLMForConditionalGeneration, SmolVLMModel, SmolVLMPreTrainedModel, SmolVLMProcessor, AutoProcessor,
     PhobertTokenizer, RobertaModel
 )
 from transformers.modeling_outputs import SequenceClassifierOutput
@@ -16,7 +17,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from glossary import segment_normalize
 
+SMOLVLM_256M_MODEL_ID = "HuggingFaceTB/SmolVLM-256M-Instruct"
 SMOLVLM_500M_MODEL_ID = "HuggingFaceTB/SmolVLM-500M-Instruct"
+SMOLVLM_2B_MODEL_ID = "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+SMOLVLM_ID = SMOLVLM_2B_MODEL_ID # Use this
 PHOBERT_MODEL_ID = "vinai/phobert-base-v2"
 MY_CACHE_DIR = "/home/21khac.dd/bm/my-cache-dir"
 DEFAUT_ANSWER2LABEL = "/home/21khac.dd/bm/data/vivqa/annotations/dicts/answer2label_en_gemini_translated.txt"
@@ -29,7 +33,7 @@ class SmolVLMForVQAClassification(SmolVLMPreTrainedModel):
         self.num_labels = len(self.label2answer)
         print(f"SmolVLMForVQAClassification: num_labels = {self.num_labels}")
 
-        self.smolvlm = Idefics3Model(config)
+        self.smolvlm = SmolVLMModel(config)
         
         # Add a dropout and a classification head
         self.dropout = nn.Dropout(0.2)
@@ -163,15 +167,19 @@ class SmolVLMForVQAClassification(SmolVLMPreTrainedModel):
         return no_decay
 
 def get_vivqa_smolvlm(
-        smolvlm_model_id = SMOLVLM_500M_MODEL_ID,
-        smolvlm_config: Idefics3Config = None,
+        smolvlm_model_id = SMOLVLM_ID,
+        smolvlm_config: SmolVLMConfig = None,
         num_labels = 336, # 335 labels plus an UNKNOWN
         answer2label_path = DEFAUT_ANSWER2LABEL,
         device = "cuda"
 ) -> SmolVLMForVQAClassification:
     
     if smolvlm_config is None:
-        smolvlm_config = Idefics3Config.from_pretrained(smolvlm_model_id)
+        smolvlm_config = SmolVLMConfig.from_pretrained(smolvlm_model_id)
+
+    # smolvlm_config._attn_implementation = "flash_attention_2"
+    smolvlm_config._attn_implementation = "sdpa"
+
 
     # --- INSTANTIATE AND MANUALLY LOAD WEIGHTS ---
 
@@ -180,9 +188,10 @@ def get_vivqa_smolvlm(
     model = SmolVLMForVQAClassification(config=smolvlm_config, num_labels=num_labels, answer2label_path=answer2label_path)
 
     # 2. Load the full pre-trained VQA model into a temporary variable
-    print("Loading full pre-trained Idefics3 model temporarily...")
-    temp_vqa_model = Idefics3ForConditionalGeneration.from_pretrained(
-        smolvlm_model_id, cache_dir=MY_CACHE_DIR, local_files_only=True
+    print("Loading full pre-trained SmolVLMForVQAClassification model temporarily...")
+    temp_vqa_model = SmolVLMForConditionalGeneration.from_pretrained(
+        smolvlm_model_id, cache_dir=MY_CACHE_DIR, local_files_only=False, # TODO: set local_files_only to True if alreay cached
+        torch_dtype=torch.bfloat16#, attn_implementation="flash_attention_2"
     ).to(device)
 
     # 3. Manually copy the weights from the temporary model to our custom model
@@ -202,7 +211,7 @@ def get_vivqa_smolvlm(
     return model
 
 def get_vivqa_smolvlm_phobert(
-    smolvlm_model_id = SMOLVLM_500M_MODEL_ID,
+    smolvlm_model_id = SMOLVLM_ID,
     phobert_id = PHOBERT_MODEL_ID,
     num_labels = 336, # 335 labels plus an UNKNOWN
     answer2label_path = DEFAUT_ANSWER2LABEL,
@@ -210,28 +219,36 @@ def get_vivqa_smolvlm_phobert(
 ):
 
     # --- LOAD MODELS AND TOKENIZER ---
-    print("Loading PhoBERT and Paligemma configurations...")
+    print("Loading PhoBERT and SmolVLM configurations...")
     phobert_model = RobertaModel.from_pretrained(phobert_id)
     phobert_tokenizer = PhobertTokenizer.from_pretrained(phobert_id)
 
-    temp_processor = Idefics3Processor.from_pretrained(smolvlm_model_id, use_fast=True)
+    temp_processor = SmolVLMProcessor.from_pretrained(smolvlm_model_id, use_fast=True)
+    # temp_processor = AutoProcessor.from_pretrained(smolvlm_model_id, use_fast=True)
     tokens_to_add = {
         "additional_special_tokens": [
             temp_processor.fake_image_token,
             temp_processor.image_token,
             temp_processor.end_of_utterance_token,
+            temp_processor.global_image_token
         ]
     }
 
     phobert_tokenizer.add_special_tokens(tokens_to_add)
+
+    print("In get_vivqa_smolvlm_phobert():")
     image_token_id = phobert_tokenizer.convert_tokens_to_ids(temp_processor.image_token)
     fake_image_token_id = phobert_tokenizer.convert_tokens_to_ids(temp_processor.fake_image_token)
-    end_of_utterance_token = phobert_tokenizer.convert_tokens_to_ids(temp_processor.end_of_utterance_token)
+    end_of_utterance_token_id = phobert_tokenizer.convert_tokens_to_ids(temp_processor.end_of_utterance_token)
+
     print(f"Added {temp_processor.image_token} token to PhobertTokenizer with new ID: {image_token_id}")
     print(f"Added {temp_processor.fake_image_token} token to PhobertTokenizer with new ID: {fake_image_token_id}")
-    print(f"Added {temp_processor.end_of_utterance_token} token to PhobertTokenizer with new ID: {end_of_utterance_token}")
+    print(f"Added {temp_processor.end_of_utterance_token} token to PhobertTokenizer with new ID: {end_of_utterance_token_id}")
+    if isinstance(temp_processor, SmolVLMProcessor):
+        global_image_token_id = phobert_tokenizer.convert_tokens_to_ids(temp_processor.global_image_token)
+        print(f"Added {temp_processor.global_image_token} token to PhobertTokenizer with new ID: {global_image_token_id}")
 
-    custom_smolvlm_config = Idefics3Config.from_pretrained(SMOLVLM_500M_MODEL_ID)
+    custom_smolvlm_config = SmolVLMConfig.from_pretrained(smolvlm_model_id)
     custom_smolvlm_config.pad_token_id = phobert_model.config.pad_token_id
     custom_smolvlm_config.text_config.pad_token_id = phobert_model.config.pad_token_id
     custom_smolvlm_config.image_token_id = image_token_id
@@ -266,7 +283,6 @@ def get_vivqa_smolvlm_phobert(
         # Determine the number of tokens to copy (the original PhoBERT vocab size)
         num_tokens_to_copy = source_vocab_size
         
-        # Copy the 768-dim PhoBERT weights into the first 768 dims of the 2304-dim PaliGemma weights
         smolvlm_model.smolvlm.text_model.embed_tokens.weight.data[0:num_tokens_to_copy, 0:source_dim] = \
             phobert_model.embeddings.word_embeddings.weight.data[0:num_tokens_to_copy, :].clone()
         print(f"Copied weights for {num_tokens_to_copy} tokens from PhoBERT (dim {source_dim}) into SmolVLM (dim {target_dim}).")
@@ -278,7 +294,6 @@ def get_vivqa_smolvlm_phobert(
     smolvlm_model.smolvlm.text_model.config.pad_token_id = phobert_tokenizer.pad_token_id
 
     smolvlm_model.smolvlm.text_model.padding_idx = phobert_tokenizer.pad_token_id
-    # TODO: delete this print line after confirmation
     print(f"smolvlm_model.smolvlm.text_model.padding_idx: {smolvlm_model.smolvlm.text_model.padding_idx}")
     print(f"smolvlm_model.smolvlm.text_model.config.pad_token_id: {smolvlm_model.smolvlm.text_model.config.pad_token_id}")
 

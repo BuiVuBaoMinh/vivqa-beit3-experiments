@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 import os
 import sys
 import json
+from tqdm import tqdm
 
 from transformers import (
     AutoTokenizer, AutoModelForImageTextToText, AutoProcessor, AutoModelForVision2Seq,
@@ -13,6 +14,11 @@ from huggingface_hub import login
 
 from smolvlm_dataset import ViVQASmolVLMDataset, create_smolvlm_dataset_by_split
 from mySmolVLM import get_vivqa_smolvlm, get_vivqa_smolvlm_phobert
+
+import torch
+print(torch.cuda.get_device_capability())
+
+sys.exit()
 
 class TempArgs(object):
     def __init__(self):
@@ -51,25 +57,34 @@ lengths = []
 over_512_count = 0
 total_count = 0
 
-def check_dataset(dataset, name):
+# The check_dataset function has been updated
+def check_dataset(dataset, dataloader, name):
     global max_len_id, over_512_count, total_count
     print(f"\nChecking {name} ({len(dataset)} samples):")
-    for item in dataset:
-        input_len = len(item["input_ids"])
+    for batch in tqdm(dataloader, desc=f"Checking {name}", leave=False):
+        # 💡 CORRECTED: Use .shape[1] to get the sequence length
+        input_len = batch["input_ids"].shape[1]
+        
         lengths.append({
-            "qid": item["qid"],
+            # Note: qid is a list of strings, so we can't save just one
+            "qids_in_batch": batch["qid"],
             "length": input_len,
             "split": name
         })
         max_len_id = max(max_len_id, input_len)
-        total_count += 1
-        if input_len > 512:
-            over_512_count += 1
-            print(f"⚠️  Long input (qid: {item['qid']}, length: {input_len})")
+        
+        # We check the length of each sample in the batch now
+        for qid, single_input_ids in zip(batch["qid"], batch["input_ids"]):
+             total_count += 1
+             # Note: This check is against the PADDED length of the batch
+             if input_len > 512:
+                 over_512_count += 1
+    # This print was moved outside the loop to only show the final result
+    print(f"Current max : {max_len_id}")
 
-check_dataset(dataset_train, "train")
-check_dataset(dataset_val, "val")
-check_dataset(dataset_test, "test")
+check_dataset(dataset_train, dataloader_train, "train")
+check_dataset(dataset_val, dataloader_val, "val")
+check_dataset(dataset_test, dataloader_test, "test")
 
 print(f"\n📊 Max input_ids length: {max_len_id}")
 print(f"📏 Examples >512 tokens: {over_512_count}/{total_count} ({over_512_count / total_count * 100:.2f}%)")
@@ -87,6 +102,14 @@ device = torch.device("cuda:5")
 # processor = AutoProcessor.from_pretrained("HuggingFaceTB/SmolVLM-500M-Instruct", cache_dir="/home/21khac.dd/bm/my-cache-dir")
 # model = AutoModelForImageTextToText.from_pretrained(
 #     "HuggingFaceTB/SmolVLM-500M-Instruct", 
+#     torch_dtype=torch.bfloat16, 
+#     cache_dir="/home/21khac.dd/bm/my-cache-dir",
+#     _attn_implementation="flash_attention_2" if device == "cuda" else "eager"
+# ).to(device, non_blocking=True)
+
+# processor = AutoProcessor.from_pretrained("HuggingFaceTB/SmolVLM2-2.2B-Instruct", cache_dir="/home/21khac.dd/bm/my-cache-dir")
+# model = AutoModelForImageTextToText.from_pretrained(
+#     "HuggingFaceTB/SmolVLM2-2.2B-Instruct", 
 #     torch_dtype=torch.bfloat16, 
 #     cache_dir="/home/21khac.dd/bm/my-cache-dir",
 #     _attn_implementation="flash_attention_2" if device == "cuda" else "eager"
