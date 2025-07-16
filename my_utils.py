@@ -106,8 +106,8 @@ def my_save_model(
                 print(f"Error parsing checkpoint {ckpt}: {e}")
                 continue
 
-        # If already have 3 checkpoints, delete oldest one
-        if len(checkpoints) >= 3:
+        # If already have 3 checkpoints, delete oldest one, adjust as needed
+        if len(checkpoints) >= 1:
             print(f"🧹 Removing old checkpoint to free space: {oldest_ckpt_path}")
             try:
                 os.remove(oldest_ckpt_path)

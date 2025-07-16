@@ -1,34 +1,33 @@
 import argparse
 import time
-import numpy as np
 import os
 import sys
 import json
 from pathlib import Path
-import copy
 import math
 
 from tqdm import tqdm
-
-from torch.utils.data import DataLoader
 import torch
-from torch.optim import AdamW
 from transformers import PhobertTokenizer
+import bitsandbytes as bnb
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from myBLIP import get_vivqa_blip, get_vivqa_blip_phobert, BlipForVQAClassification
-from blip_dataset import create_blip_datasets
-from my_utils import TrainingF1Score, my_dump_predictions, my_save_model, my_auto_resume
-from BLIP_engine_for_finetuning import BLIPHandler, blip_evaluate
-
+from my_blip2 import (
+    get_vivqa_blip2, 
+    get_vivqa_blip2_phobert, 
+    get_vivqa_blip2_phobert_with_adapter, 
+    Blip2ForVQAClassification, 
+    PHOBERT_MODEL_ID
+)
+from blip2_dataset import create_blip2_datasets
+from blip2_engine_for_finetuning import Blip2VQAHandler, blip2_evaluate
 import utils
-from optim_factory import create_optimizer, LayerDecayValueAssigner, get_is_head_flag_for_vit
-
-
+from optim_factory import LayerDecayValueAssigner
+from my_utils import my_dump_predictions, my_save_model, my_auto_resume
 
 def get_args():
-    parser = argparse.ArgumentParser('BLIP fine-tuning and evaluation script for image classification', add_help=False)
+    parser = argparse.ArgumentParser('Paligemma fine-tuning and evaluation script for image classification', add_help=False)
 
     # Optimizer parameters
     parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
@@ -111,8 +110,8 @@ def get_args():
                         help="Determine the early stopping criteria. Supports val_score and val_loss")
     parser.add_argument('--staged_training', action='store_true', default=False,
                         help="Enable 3-stage gradual unfreezing training.")
-    parser.add_argument('--freeze_word_embeddings', action='store_true', default=False,
-                        help="Freeze word embedding.")
+    parser.add_argument('--freeze_embed_tokens', action='store_true', default=False,
+                        help="Freeze SmolVLM's text_model(LLama)'s embed_tokens.")
     
     # Custom resume args
     parser.add_argument('--no_resume_optimizer', action="store_true", default=False,
@@ -123,7 +122,8 @@ def get_args():
     
     return parser.parse_args()
 
-# <<< START HELPER FUNCTIONS FOR STAGED TRAINING >>>
+# --- Staged Training Helpers for BLIP-2 ---
+
 def log_model_architecture(model, output_dir, stage_config):
     """Saves a file detailing which parameters are trainable/frozen for a given stage."""
     filepath = os.path.join(output_dir, f"Model_Architecture_{stage_config['name']}.txt")
@@ -160,7 +160,7 @@ def log_model_architecture(model, output_dir, stage_config):
         f.write(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}\n")
 
         f.write("\n--- Stage Config ---\n")
-        json.dump(stage_config, f, ensure_ascii=False)
+        json.dump(stage_config, f, ensure_ascii=False, indent=4)
 
 def get_resume_stage_index(global_epoch, stages):
     print(f"{global_epoch}")
@@ -168,127 +168,114 @@ def get_resume_stage_index(global_epoch, stages):
     for i, stage_config in enumerate(stages):
         cnt += stage_config["epochs"]
         if cnt > global_epoch:
-            return i  
+            return i 
         
-def log_blip_model_config(model, output_dir):
+def setup_model_for_stage(model: Blip2ForVQAClassification, stage_config):
+    """Freezes/unfreezes BLIP-2 model parameters based on the stage configuration."""
+    print(f"--- Configuring model for stage: {stage_config['name']} ---")
+    
+    # Freeze everything by default
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # Unfreeze based on config
+    if not stage_config.get('freeze_vision_model', True):
+        print("Unfreezing: Vision Model")
+        for param in model.blip2.vision_model.parameters():
+            param.requires_grad = True
+
+    if not stage_config.get('freeze_qformer', True):
+        print("Unfreezing: Q-Former")
+        for param in model.blip2.qformer.parameters():
+            param.requires_grad = True
+
+         # --- ADDED: Unfreeze related components ---
+        print("Unfreezing: Query Tokens")
+        model.blip2.query_tokens.requires_grad = True
+
+        print("Unfreezing: Language Projection Layer")
+        for param in model.blip2.language_projection.parameters():
+            param.requires_grad = True
+
+    if not stage_config.get('freeze_language_model', True):
+        print("Unfreezing: Language Model (excluding embeddings)")
+        for name, param in model.blip2.language_model.named_parameters():
+            if 'embed_tokens' not in name:
+                param.requires_grad = True
+    
+    if not stage_config.get('freeze_embed_tokens', True):
+        print("Unfreezing: Embed Tokens")
+        for name, param in model.blip2.language_model.get_input_embeddings().named_parameters():
+            print(name)
+            param.requires_grad = True
+
+    if not stage_config.get('freeze_classifier', True):
+        print("Unfreezing: Classifier Head")
+        for param in model.classifier.parameters():
+            param.requires_grad = True
+
+    if hasattr(model, 'phobert_embedding_adapter') and not stage_config.get('freeze_phobert_adapter', True):
+        print("Unfreezing: PhoBERT Embedding Adapter")
+        for param in model.phobert_embedding_adapter.parameters():
+            param.requires_grad = True
+
+def create_stage_optimizer(model: Blip2ForVQAClassification, stage_config, args):
+    """Creates a staged optimizer for BLIP-2."""
+    print(f"--- Creating optimizer for stage: {stage_config['name']} ---")
+    
+    no_decay_list = model.no_weight_decay()
+    optimizer_groups = []
+    lrs = stage_config['lrs']
+    
+    components = {
+        'vision_model': (model.blip2.vision_model.parameters(), lrs.get('vision_model', 0)),
+        'qformer': (model.blip2.qformer.parameters(), lrs.get('qformer', 0)),
+        'language_model': ((p for n, p in model.blip2.language_model.named_parameters() if 'embed' not in n), lrs.get('language_model', 0)),
+        'embed_tokens': (model.blip2.language_model.get_input_embeddings().parameters(), lrs.get('embed_tokens', 0)),
+        'classifier': (model.classifier.parameters(), lrs.get('classifier', 0)),
+    }
+
+    # --- Assign LRs to the bridge components ---
+    # We will give them the same LR as the Q-Former since they are functionally related.
+    qformer_lr = lrs.get('qformer', 0)
+    components['query_tokens'] = ([model.blip2.query_tokens], qformer_lr)
+    components['language_projection'] = (model.blip2.language_projection.parameters(), qformer_lr)
+
+     # Add the adapter to the components dictionary if it exists
+    if hasattr(model, 'phobert_embedding_adapter'):
+        components['phobert_adapter'] = (model.phobert_embedding_adapter.parameters(), lrs.get('phobert_adapter', 0))
+
+    for name, (params, lr) in components.items():
+        if lr == 0: continue
+        
+        trainable_params = [p for p in params if p.requires_grad]
+        if not trainable_params: continue
+
+        # Simple split for decay/no_decay
+        decay_params = [p for p in trainable_params if p.dim() >= 2]
+        no_decay_params = [p for p in trainable_params if p.dim() < 2]
+
+        if decay_params:
+            optimizer_groups.append({'params': decay_params, 'lr': lr, 'weight_decay': args.weight_decay, 'group_base_lr': lr})
+        if no_decay_params:
+            optimizer_groups.append({'params': no_decay_params, 'lr': lr, 'weight_decay': 0.0, 'group_base_lr': lr})
+        print(f"  - Group '{name}' -> lr: {lr:.1e}")
+
+    return bnb.optim.AdamW8bit(optimizer_groups, eps=args.opt_eps, betas=args.opt_betas)
+
+def log_blip2_model_config(model: Blip2ForVQAClassification, output_dir):
     outfile = os.path.join(output_dir, f"model_config.txt")
     with open(outfile, "w") as f:
-        f.write(f"--- BLIP Text-model Config ---")
-        json.dump(model.blip.text_model.config.to_dict(), f,  indent = 4)
-        
-        f.write("\n\n--- BLIP vision model Config ---\n\n")
-        json.dump(model.blip.vision_model.config.to_dict(), f, indent = 4)
+        f.write("\n\n--- Blip2 Model Config ---")
+        json.dump(model.blip2.config.to_dict(), f, indent = 4)
 
         f.write("\n\n--- Classifier head Dropout ---\n\n")
         f.write(f"nn.DropOut: {model.dropout.p}")
 
-def setup_model_for_stage(model: BlipForVQAClassification, stage_config):
-    """Freezes/unfreezes BLIP model parameters based on the stage configuration."""
-    print(f"--- Configuring model for stage: {stage_config['name']} ---")
-
-    # This logic assumes a "start trainable and freeze some" approach
-    # which is simpler. First, set everything to trainable.
-    for param in model.parameters():
-        param.requires_grad = True
-
-    if stage_config.get('freeze_blip_vision_model', True):
-        print("BLIP vision model is FROZEN.")
-        for param in model.blip.vision_model.parameters():
-            param.requires_grad = False
-
-    if stage_config.get('freeze_blip_text_model', True):
-        print("Text model (excluding embeddings) is FROZEN.")
-        for name, param in model.blip.text_model.named_parameters():
-            if 'word_embeddings' not in name:
-                param.requires_grad = False
-
-    if stage_config.get('freeze_word_embeddings', True):
-        print("PhoBERT transplanted word embeddings are FROZEN.")
-        for param in model.blip.text_model.embeddings.word_embeddings.parameters():
-            param.requires_grad = False
-
-    if stage_config.get('freeze_classifier', True):
-        print("Classifier head is FROZEN.")
-        for param in model.classifier.parameters():
-            param.requires_grad = False
-
-def create_stage_optimizer(model: BlipForVQAClassification, stage_config, args):
-    """
-    Creates a staged optimizer for the BLIP model, correctly handling both
-    differential learning rates and selective weight decay.
-    """
-    print(f"--- Creating optimizer for stage: {stage_config['name']} ---")
-    
-    no_decay_list = model.no_weight_decay()
-    print(f"Substrings for no weight decay: {no_decay_list}")
-
-    # This will be the final list of parameter groups passed to the optimizer
-    optimizer_groups = []
-    
-    # Define the components of your model and their learning rates
-    lrs = stage_config['lrs']
-    components = {
-        'blip_vision_model': {'params': [], 'lr': lrs['blip_vision_model']},
-        'blip_text_model': {'params': [], 'lr': lrs['blip_text_model']},
-        'word_embeddings': {'params': [], 'lr': lrs['word_embeddings']},
-        'classifier': {'params': [], 'lr': lrs['classifier']},
-    }
-
-    # 1. First, assign each parameter to its component group
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-        
-        if 'vision_model' in name:
-            components['blip_vision_model']['params'].append((name, param))
-        elif 'word_embeddings' in name:
-            components['word_embeddings']['params'].append((name, param))
-        elif 'text_model' in name:
-            components['blip_text_model']['params'].append((name, param))
-        elif 'classifier' in name:
-            components['classifier']['params'].append((name, param))
-
-    # 2. For each component, create final groups with and without weight decay
-    for group_name, component_data in components.items():
-        if not component_data['params']:
-            continue # Skip if a component is completely frozen
-
-        decay_params = []
-        no_decay_params = []
-        
-        # Separate the component's parameters into decay/no_decay lists
-        for name, param in component_data['params']:
-            if name.endswith(".bias") or "LayerNorm.weight" in name or any(nd in name for nd in no_decay_list):
-                no_decay_params.append(param)
-            else:
-                decay_params.append(param)
-        
-        # Create a group for parameters with weight decay
-        if decay_params:
-            optimizer_groups.append({
-                'params': decay_params,
-                'lr': component_data['lr'],
-                'weight_decay': args.weight_decay,
-                'group_base_lr': component_data['lr']
-            })
-            print(f"  - Group '{group_name}_decay' -> lr: {component_data['lr']:.1e}, wd: {args.weight_decay}")
-
-        # Create a group for parameters without weight decay
-        if no_decay_params:
-            optimizer_groups.append({
-                'params': no_decay_params,
-                'lr': component_data['lr'],
-                'weight_decay': 0.0,
-                'group_base_lr': component_data['lr']
-            })
-            print(f"  - Group '{group_name}_no_decay' -> lr: {component_data['lr']:.1e}, wd: 0.0")
-
-    return AdamW(optimizer_groups, eps=args.opt_eps, betas=args.opt_betas)
-
 def train_stage(stage_config, global_epoch_start, model,
                 data_loader_train, dataset_train, 
                 data_loader_val, dataset_val,
-                optimizer, device, task_handler: BLIPHandler, args,
+                optimizer, device, task_handler: Blip2ForVQAClassification, args,
                 # Pass metric trackers by reference (as a dict) to modify them
                 metric_trackers,
                 stage_index):
@@ -328,10 +315,10 @@ def train_stage(stage_config, global_epoch_start, model,
         for step, batch in enumerate(tqdm(data_loader_train, desc=f"Epoch {epoch}", leave=False)):
             optimizer.zero_grad()
 
-            pixel_values = batch["pixel_values"].to(device)
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
+            pixel_values = batch["pixel_values"].to(device=device, dtype=torch.bfloat16)
+            input_ids = batch["input_ids"].to(device=device)
+            attention_mask = batch["attention_mask"].to(device=device)
+            labels = batch["labels"].to(device=device)
             qid = batch["qid"]
 
             # Scheduler step calculation needs to be relative to the stage
@@ -347,8 +334,13 @@ def train_stage(stage_config, global_epoch_start, model,
                     param_group["lr"] = group_base_lr * lr_scale
 
             train_stats = task_handler.train_batch(
-                    model, pixel_values, input_ids, attention_mask, labels, qid
-                )
+                model = model,
+                input_ids = input_ids,
+                pixel_values = pixel_values,
+                attention_mask = attention_mask,
+                labels = labels, # Use for our classification
+                qid = None
+            )
             
             loss = train_stats["loss"]
             batch_score = train_stats["score"]
@@ -386,19 +378,19 @@ def train_stage(stage_config, global_epoch_start, model,
                 my_save_model(args=args, epoch=epoch, model=model, optimizer=optimizer)
                 
         if data_loader_val is not None:
-            test_stats = blip_evaluate(
-                data_loader_val, model, dataset_val.processor.tokenizer, device, task_handler
+            val_stats = blip2_evaluate(
+                args, data_loader_val, model, device, task_handler, return_preds=False
             )
-            print(f"Performance of the network on the {len(data_loader_val)} val batches: {test_stats['score']:.1f}%")
+            print(f"Performance of the network on the {len(data_loader_val)} val batches: {val_stats['score']:.1f}%")
 
-            if metric_trackers['max_accuracy'] < test_stats['score']:
-                metric_trackers['max_accuracy'] = test_stats['score']
+            if metric_trackers['max_accuracy'] < val_stats['score']:
+                metric_trackers['max_accuracy'] = val_stats['score']
                 if args.output_dir and args.save_ckpt:
                     print(f"*** New best score! Saving model for epoch {epoch}. ***")
                     my_save_model(args=args, epoch=f"best-{epoch}", model=model, optimizer=optimizer)
             
-            current_val_score = test_stats['score']
-            current_val_loss = test_stats['loss']
+            current_val_score = val_stats['score']
+            current_val_loss = val_stats['loss']
 
             if args.early_stopping == "val_score":
                 if metric_trackers['max_accuracy_stop'] < current_val_score:
@@ -425,10 +417,13 @@ def train_stage(stage_config, global_epoch_start, model,
                          'train_score': average_score, 
                          'train_min_lr': min_lr, 
                          'train_max_lr': max_lr,
-                         **{f'val_{k}': v.item() if isinstance(v, torch.Tensor) else v for k, v in test_stats.items() if k != "prediction"},
+                         **{f'val_{k}': v.item() if isinstance(v, torch.Tensor) else v for k, v in val_stats.items() if k != "prediction"},
                          'epoch': epoch, 
                          'n_parameters': sum(p.numel() for p in model.parameters() if p.requires_grad), 
                          'time': epoch_training_time}
+            
+            del val_stats
+            torch.cuda.empty_cache()
         else: # No validation set
             log_stats = {'train_loss': average_loss, 
                          'train_score': average_score, 
@@ -448,91 +443,74 @@ def train_stage(stage_config, global_epoch_start, model,
     
     return False # Signal to continue to next stage
 
-# <<< END HELPER FUNCTIONS FOR STAGED TRAINING >>>
-
 def main(args):
+
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
 
     if args.task_cache_path is None:
         args.task_cache_path = args.output_dir
 
     device = torch.device(args.device)
 
+    dtype = torch.bfloat16
+
     phobert_tokenizer = None
 
     if args.phobert:
-        phobert_tokenizer = PhobertTokenizer.from_pretrained("vinai/phobert-base-v2")
+        phobert_tokenizer = PhobertTokenizer.from_pretrained("vinai/phobert-base-v2", use_fast=True)
 
     if args.phobert:
-        model = get_vivqa_blip_phobert(device=device, answer2label_path=args.answer2label).to(device, non_blocking=True)
+        # model = get_vivqa_blip2_phobert(device=device, answer2label_path=args.answer2label).to(device, non_blocking=True, dtype=dtype)
+        model = get_vivqa_blip2_phobert_with_adapter(
+            device=device, answer2label_path=args.answer2label
+        ).to(device, non_blocking=True, dtype=dtype)
     else:
-        model = get_vivqa_blip(device = device, answer2label_path=args.answer2label).to(device, non_blocking=True)
+        model = get_vivqa_blip2(
+            device = device, answer2label_path=args.answer2label
+        ).to(device, non_blocking=True, dtype=dtype)
 
-    dataset_train, data_loader_train, dataset_val, data_loader_val = create_blip_datasets(
+    model.gradient_checkpointing_enable()
+
+    dataset_train, data_loader_train, dataset_val, data_loader_val = create_blip2_datasets(
         args,
-        phobert_tokenizer=phobert_tokenizer
+        phobert_tokenizer=phobert_tokenizer,
     )
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     print('Number of params:', n_parameters)
 
-    task_handler = BLIPHandler()
+    task_handler = Blip2VQAHandler()
 
     if args.eval:
         my_auto_resume(args, model=model, optimizer=None, device=device) # Load best checkpoint for eval
-        dataset_test, data_loader_test = create_blip_datasets(
+        dataset_test, data_loader_test = create_blip2_datasets(
             args,
             is_eval = True,
             phobert_tokenizer = phobert_tokenizer 
         )
-        result = blip_evaluate(
+        result = blip2_evaluate(
+            args,
             data_loader=data_loader_test,
             model=model,
-            tokenizer=dataset_test.processor.tokenizer,
             device=device,
             handler=task_handler,
             return_preds=True
         )
-        my_dump_predictions(args, result["prediction"], "vivqa_blip_test")
+        my_dump_predictions(args, result["prediction"], "vivqa_blip2_test")
         exit(0)
 
     start_time = time.time()
 
-    log_blip_model_config(model, args.output_dir)
+    log_blip2_model_config(model, args.output_dir)
 
     if args.staged_training and args.phobert:
         
         print("--- Staged Training Enabled (2 Stages) ---")
 
         STAGES = [
-            {
-                'name': 'Stage 1 - Train Backbones (Embeddings Frozen)',
-                'epochs': 5,  # Give it ample time to adapt
-                'freeze_blip_vision_model': False,
-                'freeze_blip_text_model': False,
-                'freeze_word_embeddings': True,  # <<< THE KEY
-                'freeze_classifier': False,
-                'lrs': {
-                    'blip_vision_model': 5e-6,
-                    'blip_text_model': 5e-6,
-                    'classifier': 2e-5,
-                    'word_embeddings': 0  # Explicitly 0 LR
-                }
-            },
-            {
-                'name': 'Stage 2 - Fine-tune Embeddings (Full End-to-End)',
-                'epochs': 15,  # Final polishing stage
-                'freeze_blip_vision_model': False,
-                'freeze_blip_text_model': False,
-                'freeze_word_embeddings': False, # <<< UNFREEZE
-                'freeze_classifier': False,
-                'lrs': {
-                    'blip_vision_model': 2e-5,
-                    'blip_text_model': 2e-5,
-                    'classifier': 1e-5,
-                    'word_embeddings': 1e-6 # <<< Use a very small LR
-                }
-            }
+            # Add stages when use staged_training
         ]
         
         global_epoch = args.start_epoch
@@ -598,8 +576,6 @@ def main(args):
         if args.layer_decay < 1.0:
             lrs = list(args.layer_decay ** (num_layers + 1 - i) for i in range(num_layers + 2))
             assigner = LayerDecayValueAssigner(lrs)
-        elif args.task_head_lr_weight > 1:
-            assigner = LayerDecayValueAssigner([1.0, args.task_head_lr_weight], scale_handler=get_is_head_flag_for_vit)
         else:
             assigner = None
         
@@ -608,19 +584,23 @@ def main(args):
 
         # Encapsulate the original loop logic into a single stage config
         stage_config = {
-                'name': 'Standard End-to-End Training',
-                'epochs': args.epochs,
-                'freeze_blip_vision_model': True,
-                'freeze_blip_text_model': False,
-                'freeze_word_embeddings': args.freeze_word_embeddings,
-                'freeze_classifier': False,
-                'lrs': {
-                    'blip_vision_model': 2e-5,
-                    'blip_text_model': 2e-5,
-                    'classifier': 2e-5,
-                    'word_embeddings': 1e-6 # <<< Use a very small LR
-                }
+            'name': 'Full_Finetune_End_to_End',
+            'epochs': args.epochs, 
+            'freeze_vision_model': True,
+            'freeze_language_model': False, 
+            'freeze_embed_tokens': args.freeze_embed_tokens, 
+            'freeze_qformer': False, 
+            'freeze_classifier': False, 
+            'freeze_phobert_adapter': False, # Ensure the adapter is trainable
+            'lrs': {
+                'vision_model': 2e-5, 
+                'qformer': 2e-5, 
+                'language_model': 2e-5, 
+                'embed_tokens': 5e-6, 
+                'classifier': 5e-5,
+                'phobert_adapter': 5e-5
             }
+        }
 
         optimizer = create_stage_optimizer(model, stage_config, args)
         setup_model_for_stage(model, stage_config)
@@ -661,6 +641,5 @@ def main(args):
 
 if __name__ == "__main__":
     opts = get_args()
-    if opts.output_dir:
-        Path(opts.output_dir).mkdir(parents=True, exist_ok=True)
+    Path(opts.output_dir).mkdir(parents=True, exist_ok=True)
     main(opts)
