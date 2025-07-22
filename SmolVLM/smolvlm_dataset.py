@@ -46,8 +46,8 @@ class ViVQASmolVLMDataset(torch.utils.data.Dataset):
         # self.processor = AutoProcessor.from_pretrained(smolvlm_model_id, use_fast=True)
 
         self.processor.image_processor.do_resize = True
-        # self.processor.image_processor.size = {"longest_edge": 2 * 384}
-        # self.processor.image_processor.max_image_size = {"longest_edge": 384}
+        self.processor.image_processor.size = {"longest_edge": 2 * 384}
+        self.processor.image_processor.max_image_size = {"longest_edge": 384}
 
         if args.phobert and phobert_tokenizer is not None:
             tokens_to_add = {
@@ -240,7 +240,6 @@ def smolvlm_collate_fn(batch, processor):
         return_tensors="pt", 
         padding=True, # Pad text to the longest in the batch
         truncation=False,
-        max_length=512
     )
 
     # Gather labels and qids

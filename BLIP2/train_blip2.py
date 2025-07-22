@@ -241,7 +241,7 @@ def create_stage_optimizer(model: Blip2ForVQAClassification, stage_config, args)
     components['query_tokens'] = ([model.blip2.query_tokens], qformer_lr)
     components['language_projection'] = (model.blip2.language_projection.parameters(), qformer_lr)
 
-     # Add the adapter to the components dictionary if it exists
+    # Add the adapter to the components dictionary if it exists
     if hasattr(model, 'phobert_embedding_adapter'):
         components['phobert_adapter'] = (model.phobert_embedding_adapter.parameters(), lrs.get('phobert_adapter', 0))
 

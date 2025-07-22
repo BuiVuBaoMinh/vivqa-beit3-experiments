@@ -9,7 +9,7 @@ torchrun --nproc-per-node=1 train_smolvlm.py \
     --update_freq 1 \
     --warmup_epochs 0 \
     --data_path /home/21khac.dd/bm/data/vivqa \
-    --output_dir /home/21khac.dd/bm/smolvlm-pb-1 \
+    --output_dir /home/21khac.dd/bm/smolvlm-pb-2 \
     --num_workers=10 \
     --weight_decay 0.05 \
     --save_ckpt_freq 1 \
@@ -19,12 +19,12 @@ torchrun --nproc-per-node=1 train_smolvlm.py \
     --patience 5 \
     --lr_sched_type cos \
     --answer2label "/home/21khac.dd/bm/data/vivqa/annotations/dicts/answer2label_en_gemini_translated.txt" \
-    --device "cuda:5" \
-    --phobert \
-    --resume "latest"
+    --device "cuda:2" \
+    --resume "latest" \
     --no_resume_optimizer \
-
-    --freeze_embed_tokens
+    --phobert \
+    --phobert_embedding_adapter "non-linear" \
+    --freeze_embed_tokens \
 
 
     --staged_training \

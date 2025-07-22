@@ -18,7 +18,7 @@ import bitsandbytes as bnb
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from mySmolVLM import get_vivqa_smolvlm, get_vivqa_smolvlm_phobert, SmolVLMForVQAClassification
+from mySmolVLM import get_vivqa_smolvlm, get_vivqa_smolvlm_phobert_with_adapter, SmolVLMForVQAClassification
 from smolvlm_dataset import create_smolvlm_datasets
 from my_utils import TrainingF1Score, my_dump_predictions, my_save_model, my_auto_resume
 from smolvlm_engine_for_finetuning import SmolVLMHandler, smolvlm_evaluate
@@ -113,6 +113,7 @@ def get_args():
                         help="Enable 3-stage gradual unfreezing training.")
     parser.add_argument('--freeze_embed_tokens', action='store_true', default=False,
                         help="Freeze SmolVLM's text_model(LLama)'s embed_tokens.")
+    parser.add_argument('--phobert_embedding_adapter', type=str, default='linear', choices=['linear', 'non-linear'])
     
     # Custom resume args
     parser.add_argument('--no_resume_optimizer', action="store_true", default=False,
@@ -160,7 +161,7 @@ def log_model_architecture(model, output_dir, stage_config):
         f.write(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}\n")
 
         f.write("\n--- Stage Config ---\n")
-        json.dump(stage_config, f, ensure_ascii=False)
+        json.dump(stage_config, f, ensure_ascii=False, indent=4)
 
 def get_resume_stage_index(global_epoch, stages):
     print(f"{global_epoch}")
@@ -173,17 +174,26 @@ def get_resume_stage_index(global_epoch, stages):
 def log_smolvlm_model_config(model: SmolVLMForVQAClassification, output_dir):
     outfile = os.path.join(output_dir, f"model_config.txt")
     with open(outfile, "w") as f:
-        f.write(f"--- SmolVLM Text Model Config ---")
-        json.dump(model.smolvlm.text_model.config.to_dict(), f,  indent = 4)
+        # f.write(f"--- SmolVLM Text Model Config ---")
+        # json.dump(model.smolvlm.text_model.config.to_dict(), f,  indent = 4)
         
-        f.write("\n\n--- SmolVLM Vision Model Config ---")
-        json.dump(model.smolvlm.vision_model.config.to_dict(), f, indent = 4)
+        # f.write("\n\n--- SmolVLM Vision Model Config ---")
+        # json.dump(model.smolvlm.vision_model.config.to_dict(), f, indent = 4)
 
         f.write("\n\n--- SmolVLM Model Config ---")
         json.dump(model.smolvlm.config.to_dict(), f, indent = 4)
 
         f.write("\n\n--- Classifier head Dropout ---\n\n")
         f.write(f"nn.DropOut: {model.dropout.p}")
+
+        f.write("\n\n--- Embed tokens shape ---\n\n")
+        for name, params in model.smolvlm.text_model.get_input_embeddings().named_parameters():
+            f.write(f"{name}: {params.shape}\n")
+
+        if hasattr(model, 'phobert_embedding_adapter'):
+            f.write("\n\n--- Phobert Adapter Shape ---\n\n")
+            for name, params in model.phobert_embedding_adapter.named_parameters():
+                f.write(f"{name}: {params.shape}\n")
 
 def setup_model_for_stage(model: SmolVLMForVQAClassification, stage_config):
     """Freezes/unfreezes BLIP model parameters based on the stage configuration."""
@@ -223,7 +233,7 @@ def create_stage_optimizer(model: SmolVLMForVQAClassification, stage_config, arg
     print(f"--- Creating optimizer for stage: {stage_config['name']} ---")
     
     no_decay_list = model.no_weight_decay()
-    print(f"Substrings for no weight decay: {no_decay_list}")
+    # print(f"Substrings for no weight decay: {no_decay_list}")
 
     # This will be the final list of parameter groups passed to the optimizer
     optimizer_groups = []
@@ -236,6 +246,13 @@ def create_stage_optimizer(model: SmolVLMForVQAClassification, stage_config, arg
         'embed_tokens': {'params': [], 'lr': lrs['embed_tokens']},
         'classifier': {'params': [], 'lr': lrs['classifier']},
     }
+
+    # Add the adapter to the components dictionary if it exists
+    if hasattr(model, 'phobert_embedding_adapter'):
+        components['phobert_adapter'] = {
+           'params': [], 
+           'lr': lrs.get('phobert_adapter', 0)
+        }
 
     # 1. First, assign each parameter to its component group
     for name, param in model.named_parameters():
@@ -250,6 +267,8 @@ def create_stage_optimizer(model: SmolVLMForVQAClassification, stage_config, arg
             components['smolvlm_text_model']['params'].append((name, param))
         elif 'classifier' in name:
             components['classifier']['params'].append((name, param))
+        elif 'phobert_embedding_adapter' in name:
+            components['phobert_adapter']['params'].append((name, param))
 
     # 2. For each component, create final groups with and without weight decay
     for group_name, component_data in components.items():
@@ -459,6 +478,9 @@ def train_stage(stage_config, global_epoch_start, model,
         if metric_trackers['epochs_without_improvements'] >= args.patience: # and stage_index >= 2: # and average_score >= 85:
             print(f"No improvement in {args.patience} consecutive epochs. Early stopping stage.")
             return True # Signal to stop all training
+
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
     
     return False # Signal to continue to next stage
 
@@ -482,7 +504,7 @@ def main(args):
         phobert_tokenizer = PhobertTokenizer.from_pretrained("vinai/phobert-base-v2", use_fast=True)
 
     if args.phobert:
-        model = get_vivqa_smolvlm_phobert(device=device, answer2label_path=args.answer2label).to(device, non_blocking=True, dtype=dtype)
+        model = get_vivqa_smolvlm_phobert_with_adapter(args=args, device=device, answer2label_path=args.answer2label).to(device, non_blocking=True, dtype=dtype)
     else:
         model = get_vivqa_smolvlm(device = device, answer2label_path=args.answer2label).to(device, non_blocking=True, dtype=dtype)
 
@@ -613,8 +635,9 @@ def main(args):
                 'lrs': {
                     'smolvlm_vision_model': 2e-5,
                     'smolvlm_text_model': 2e-5,
-                    'classifier': 2e-5,
-                    'embed_tokens': 5e-6# <<< Use a very small LR
+                    'classifier': 5e-5, # 4e-5
+                    'embed_tokens': 5e-6, # <<< Use a very small LR
+                    'phobert_adapter': 5e-5
                 }
             }
 
