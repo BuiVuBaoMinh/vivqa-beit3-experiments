@@ -9,12 +9,12 @@ from transformers import (
     Blip2Config,
     Blip2Model,
     Blip2PreTrainedModel,
-    Blip2ForConditionalGeneration,
+    Blip2ForConditionalGeneration, T5ForConditionalGeneration,
     AutoProcessor,
     PhobertTokenizer,
     RobertaModel,
 )
-from transformers.modeling_outputs import SequenceClassifierOutput
+from transformers.modeling_outputs import SequenceClassifierOutput, Seq2SeqLMOutput
 from transformers.processing_utils import Unpack
 from transformers.models.blip_2.processing_blip_2 import AddedToken
 from transformers.models.blip_2.modeling_blip_2 import Blip2ForConditionalGenerationModelOutput, KwargsForCausalLM
@@ -23,7 +23,9 @@ from typing import Any, Callable, Optional, Tuple, Union
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # Define constants for model IDs and paths
-BLIP2_MODEL_ID = "Salesforce/blip2-opt-2.7b"
+BLIP2_DECODER_BASED_ID = "Salesforce/blip2-opt-2.7b"
+BLIP2_ENCODER_DECODER_ID = "Salesforce/blip2-flan-t5-xl-coco"
+BLIP2_MODEL_ID = BLIP2_ENCODER_DECODER_ID
 PHOBERT_MODEL_ID = "vinai/phobert-base-v2"
 MY_CACHE_DIR = "/home/21khac.dd/bm/my-cache-dir"
 DEFAULT_ANSWER2LABEL = "/home/21khac.dd/bm/data/vivqa/annotations/dicts/answer2label_en_gemini_translated.txt"
@@ -57,10 +59,27 @@ class Blip2ForVQAClassification(Blip2PreTrainedModel):
         self,
         pixel_values: torch.FloatTensor,
         input_ids: torch.LongTensor,
+        decoder_input_ids: torch.LongTensor = None,
+        decoder_attention_mask: torch.LongTensor = None,
         attention_mask=None,
         labels=None,
         return_dict=True,
     ):
+
+        # Get the batch size and device from the input_ids tensor.
+        # batch_size = input_ids.shape[0]
+        # device = input_ids.device
+
+        # Manually create the decoder_input_ids for the T5 model.
+        # We'll start the decoder with the pad token. This is a common
+        # technique for getting a single pooled output from a decoder
+        # for a classification task.
+        # decoder_input_ids = torch.full(
+        #     (batch_size, 1),
+        #     fill_value=self.config.text_config.pad_token_id,
+        #     dtype=torch.long,
+        #     device=device
+        # )
 
         # Pass inputs to the base BLIP-2 model.
         if self.use_phobert_adapter:
@@ -70,27 +89,31 @@ class Blip2ForVQAClassification(Blip2PreTrainedModel):
                 attention_mask=attention_mask,
                 output_hidden_states=True,
                 return_dict=True,
+                decoder_input_ids=decoder_input_ids,
+                decoder_attention_mask=decoder_attention_mask,
                 # Pass the adapter and the flag to activate it
                 use_phobert_adapter=self.use_phobert_adapter,
                 phobert_embedding_adapter=self.phobert_embedding_adapter,
             )
         else:
-                outputs = self.blip2(
+            outputs = self.blip2(
                 pixel_values=pixel_values,
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 output_hidden_states=True,
                 return_dict=True,
+                decoder_input_ids=decoder_input_ids,
+                decoder_attention_mask=decoder_attention_mask,
             )
 
         # 2. Get the last hidden state from the language model's output.
         # Shape: (batch_size, sequence_length, hidden_size)
-        hidden_states = outputs.language_model_outputs.hidden_states[-1]
+        last_hidden_state = outputs.language_model_outputs.decoder_hidden_states[-1]
 
         # 3. Use the hidden state of the LAST token as the pooled representation.
         # This token's state is conditioned on both the image (via Q-Former) and the full question.
         # Shape: (batch_size, hidden_size)
-        pooled_output = hidden_states[:, -1, :]
+        pooled_output = last_hidden_state[:, -1, :]
 
         # 4. Apply dropout and the classification head
         pooled_output = self.dropout(pooled_output)
@@ -109,8 +132,8 @@ class Blip2ForVQAClassification(Blip2PreTrainedModel):
         return SequenceClassifierOutput(
             loss=loss,
             logits=logits,
-            hidden_states=outputs.language_model_outputs.hidden_states,
-            attentions=outputs.language_model_outputs.attentions,
+            hidden_states=outputs.language_model_outputs.decoder_hidden_states,
+            attentions=outputs.language_model_outputs.decoder_attentions,
         )
     
     def _load_answer_mappings(self, file_path):
@@ -340,6 +363,9 @@ def get_vivqa_blip2_phobert_with_adapter(
 
     print("✅ PhoBERT embedding transplant with adapter successful!")
 
+    del phobert_tokenizer
+    del phobert_model
+
     return blip2_model
 
 class MyBlip2Model(Blip2Model):
@@ -439,10 +465,22 @@ class MyBlip2Model(Blip2Model):
 
                 loss = loss_fct(shift_logits.view(-1, self.config.text_config.vocab_size), shift_labels.view(-1))
         else:
+            decoder_inputs_embeds = None
+            if use_phobert_adapter:
+                if phobert_embedding_adapter is None:
+                    raise ValueError("`phobert_embedding_adapter` must be provided when `use_phobert_adapter` is True.")
+                
+                if decoder_input_ids is not None:
+                    # 1. Get the raw 768-dim embeddings from the swapped PhoBERT layer.
+                    raw_decoder_embeds = self.language_model.get_input_embeddings()(decoder_input_ids)
+                    # 2. Apply the adapter to project them to the T5's 2048 dimension.
+                    decoder_inputs_embeds = phobert_embedding_adapter(raw_decoder_embeds)
+
             outputs = self.language_model(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
-                decoder_input_ids=decoder_input_ids,
+                decoder_input_ids=decoder_input_ids if decoder_inputs_embeds is None else None,
+                decoder_inputs_embeds=decoder_inputs_embeds,
                 decoder_attention_mask=decoder_attention_mask,
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
@@ -450,6 +488,7 @@ class MyBlip2Model(Blip2Model):
                 labels=labels,
                 **kwargs,
             )
+
             loss = outputs.loss
             logits = outputs.logits
             outputs = outputs.to_tuple() if not return_dict else outputs

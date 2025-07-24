@@ -1,6 +1,7 @@
 import json
 import argparse
-from sklearn.metrics import precision_score, recall_score, f1_score
+# Import accuracy_score along with the others
+from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
 
 def segment_normalize(text):
     normalized_text = text.lower()
@@ -45,9 +46,6 @@ def main(args):
     gts = {item["id"]: segment_normalize(item["answer"]) for item in gt_data}
     res = {item["question_id"]: segment_normalize(item["answer"]) for item in res_data}
 
-    # gts = {item["id"]: (item["answer"]) for item in gt_data}
-    # res = {item["question_id"]: (item["answer"]) for item in res_data}
-
     y_true = []
     y_pred = []
 
@@ -69,12 +67,14 @@ def main(args):
         y_true.append(gt_label)
         y_pred.append(pred_label)
 
-    # Compute F1 score
+    # Print lengths for verification
     print(f"len(gt_label): {len(gts)}")
     print(f"len(pred_label): {len(res)}")
     print(f"len(y_true): {len(y_true)}")
     print(f"len(y_pred): {len(y_pred)}")
+    print("-" * 30) # Separator for clarity
 
+    # Compute F1 score
     f1 = f1_score(y_true, y_pred, average=average)
     print(f"F1 Score ({average}): {f1:.4f}")
 
@@ -85,6 +85,10 @@ def main(args):
     # Compute Recall score
     r = recall_score(y_true, y_pred, average=average)
     print(f"Recall Score ({average}): {r:.4f}")
+
+    # Compute Accuracy score
+    acc = accuracy_score(y_true, y_pred)
+    print(f"Accuracy Score: {acc:.4f}")
 
 
 if __name__ == "__main__":

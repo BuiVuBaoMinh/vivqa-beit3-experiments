@@ -12,12 +12,20 @@ class Blip2VQAHandler:
         self.id2label = None
         self.metric_logger = None
 
-    def train_batch(self, model, pixel_values, input_ids, attention_mask, labels, qid=None):
+    def train_batch(
+        self, model, 
+        pixel_values, 
+        input_ids, attention_mask, 
+        decoder_input_ids, decoder_attention_mask,
+        labels, qid=None
+    ):
         """Performs a single training step."""
         outputs = model(
             pixel_values=pixel_values,
             input_ids=input_ids,
             attention_mask=attention_mask,
+            decoder_input_ids = decoder_input_ids,
+            decoder_attention_mask = decoder_attention_mask,
             labels=labels,
         )
         loss = outputs.loss
@@ -34,12 +42,20 @@ class Blip2VQAHandler:
         self.metric_logger = metric_logger
         self.id2label = data_loader.dataset.label_to_answer
 
-    def eval_batch(self, model, pixel_values, input_ids, attention_mask, labels, qid):
+    def eval_batch(
+        self, model, 
+        pixel_values, 
+        input_ids, attention_mask, 
+        decoder_input_ids, decoder_attention_mask,
+        labels, qid
+    ):
         """Performs a single evaluation step."""
         outputs = model(
             pixel_values=pixel_values,
             input_ids=input_ids,
             attention_mask=attention_mask,
+            decoder_input_ids=decoder_input_ids,
+            decoder_attention_mask=decoder_attention_mask,
             labels=labels,
         )
         
@@ -80,6 +96,8 @@ def blip2_evaluate(args, data_loader, model, device, handler: Blip2VQAHandler, r
         pixel_values = batch["pixel_values"].to(device, dtype=torch.bfloat16)
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
+        decoder_input_ids = batch["decoder_input_ids"].to(device=device)
+        decoder_attention_mask = batch["decoder_attention_mask"].to(device=device)
         labels = batch["labels"].to(device)
         qid = batch["qid"]
 
@@ -88,6 +106,8 @@ def blip2_evaluate(args, data_loader, model, device, handler: Blip2VQAHandler, r
             pixel_values=pixel_values,
             input_ids=input_ids,
             attention_mask=attention_mask,
+            decoder_input_ids=decoder_input_ids,
+            decoder_attention_mask=decoder_attention_mask,
             labels=labels,
             qid=qid
         )

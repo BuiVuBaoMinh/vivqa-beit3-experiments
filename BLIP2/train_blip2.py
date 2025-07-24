@@ -170,53 +170,73 @@ def get_resume_stage_index(global_epoch, stages):
         if cnt > global_epoch:
             return i 
         
+# In train_blip2.py
+
 def setup_model_for_stage(model: Blip2ForVQAClassification, stage_config):
     """Freezes/unfreezes BLIP-2 model parameters based on the stage configuration."""
     print(f"--- Configuring model for stage: {stage_config['name']} ---")
     
+    # For debugging: print the configuration being used
+    # print("Stage Config:", stage_config)
+
     # Freeze everything by default
     for param in model.parameters():
         param.requires_grad = False
 
-    # Unfreeze based on config
+    # Check if the language model is a T5-based model
+    is_t5_model = any("T5" in arch for arch in model.blip2.config.text_config.architectures)
+
+    # Unfreeze Vision Model
     if not stage_config.get('freeze_vision_model', True):
         print("Unfreezing: Vision Model")
         for param in model.blip2.vision_model.parameters():
             param.requires_grad = True
 
+    # Unfreeze Q-Former and related bridge components
     if not stage_config.get('freeze_qformer', True):
-        print("Unfreezing: Q-Former")
+        print("Unfreezing: Q-Former, Query Tokens, and Language Projection")
         for param in model.blip2.qformer.parameters():
             param.requires_grad = True
-
-         # --- ADDED: Unfreeze related components ---
-        print("Unfreezing: Query Tokens")
         model.blip2.query_tokens.requires_grad = True
-
-        print("Unfreezing: Language Projection Layer")
         for param in model.blip2.language_projection.parameters():
             param.requires_grad = True
-
-    if not stage_config.get('freeze_language_model', True):
-        print("Unfreezing: Language Model (excluding embeddings)")
-        for name, param in model.blip2.language_model.named_parameters():
-            if 'embed_tokens' not in name:
-                param.requires_grad = True
     
-    if not stage_config.get('freeze_embed_tokens', True):
-        print("Unfreezing: Embed Tokens")
-        for name, param in model.blip2.language_model.get_input_embeddings().named_parameters():
-            print(name)
-            param.requires_grad = True
+    # Unfreeze Language Model (main part)
+    if not stage_config.get('freeze_language_model', True):
+        if is_t5_model:
+            print("Unfreezing: T5 Encoder and Decoder")
+            for param in model.blip2.language_model.encoder.parameters():
+                param.requires_grad = True
+            for param in model.blip2.language_model.decoder.parameters():
+                param.requires_grad = True
+        else: # For decoder-only models
+            print("Unfreezing: Language Model (main blocks)")
+            for name, param in model.blip2.language_model.named_parameters():
+                if 'embed_tokens' not in name:
+                    param.requires_grad = True
 
+    # Unfreeze Classifier
     if not stage_config.get('freeze_classifier', True):
         print("Unfreezing: Classifier Head")
         for param in model.classifier.parameters():
             param.requires_grad = True
 
+    # Unfreeze Adapter
     if hasattr(model, 'phobert_embedding_adapter') and not stage_config.get('freeze_phobert_adapter', True):
         print("Unfreezing: PhoBERT Embedding Adapter")
         for param in model.phobert_embedding_adapter.parameters():
+            param.requires_grad = True
+
+    # For T5 models, ALWAYS ensure the decoder is frozen.
+    # if is_t5_model:
+    #     print("T5 config: Freezing Decoder and LM Head")
+    #     for param in model.blip2.language_model.decoder.parameters():
+    #         param.requires_grad = False
+
+        # Unfreeze Embeddings
+    if not stage_config.get('freeze_embed_tokens', True):
+        print("Unfreezing: Embed Tokens")
+        for param in model.blip2.language_model.get_input_embeddings().parameters():
             param.requires_grad = True
 
 def create_stage_optimizer(model: Blip2ForVQAClassification, stage_config, args):
@@ -226,14 +246,35 @@ def create_stage_optimizer(model: Blip2ForVQAClassification, stage_config, args)
     no_decay_list = model.no_weight_decay()
     optimizer_groups = []
     lrs = stage_config['lrs']
-    
-    components = {
-        'vision_model': (model.blip2.vision_model.parameters(), lrs.get('vision_model', 0)),
-        'qformer': (model.blip2.qformer.parameters(), lrs.get('qformer', 0)),
-        'language_model': ((p for n, p in model.blip2.language_model.named_parameters() if 'embed' not in n), lrs.get('language_model', 0)),
-        'embed_tokens': (model.blip2.language_model.get_input_embeddings().parameters(), lrs.get('embed_tokens', 0)),
-        'classifier': (model.classifier.parameters(), lrs.get('classifier', 0)),
-    }
+
+     # --- MODIFICATION START ---
+    # Check if the language model is a T5-based model
+    is_t5_model = any("T5" in arch for arch in model.blip2.config.text_config.architectures)
+    print(model.blip2.config.text_config.architectures)
+
+    if is_t5_model:
+        print("Using T5-specific optimizer grouping.")
+        components = {
+            'vision_model': (model.blip2.vision_model.parameters(), lrs.get('vision_model', 0)),
+            'qformer': (model.blip2.qformer.parameters(), lrs.get('qformer', 0)),
+            'language_model': (
+                (p for n, p in model.blip2.language_model.named_parameters() if 'shared' not in n), 
+                lrs.get('language_model', 0)
+            ),
+            # T5 models use a 'shared' embedding layer
+            'embed_tokens': (model.blip2.language_model.shared.parameters(), lrs.get('embed_tokens', 0)),
+            'classifier': (model.classifier.parameters(), lrs.get('classifier', 0)),
+        }
+    else:
+        print("Using default (decoder-only) optimizer grouping.")
+        components = {
+            'vision_model': (model.blip2.vision_model.parameters(), lrs.get('vision_model', 0)),
+            'qformer': (model.blip2.qformer.parameters(), lrs.get('qformer', 0)),
+            'language_model': ((p for n, p in model.blip2.language_model.named_parameters() if 'embed_tokens' not in n), lrs.get('language_model', 0)),
+            'embed_tokens': (model.blip2.language_model.get_input_embeddings().parameters(), lrs.get('embed_tokens', 0)),
+            'classifier': (model.classifier.parameters(), lrs.get('classifier', 0)),
+        }
+    # --- MODIFICATION END ---
 
     # --- Assign LRs to the bridge components ---
     # We will give them the same LR as the Q-Former since they are functionally related.
@@ -271,6 +312,15 @@ def log_blip2_model_config(model: Blip2ForVQAClassification, output_dir):
 
         f.write("\n\n--- Classifier head Dropout ---\n\n")
         f.write(f"nn.DropOut: {model.dropout.p}")
+
+        f.write("\n\n--- Embed tokens shape ---\n\n")
+        for name, params in model.blip2.language_model.get_input_embeddings().named_parameters():
+            f.write(f"{name}: {params.shape}\n")
+
+        if hasattr(model, 'phobert_embedding_adapter'):
+            f.write("\n\n--- Phobert Adapter Shape ---\n\n")
+            for name, params in model.phobert_embedding_adapter.named_parameters():
+                f.write(f"{name}: {params.shape}\n")
 
 def train_stage(stage_config, global_epoch_start, model,
                 data_loader_train, dataset_train, 
@@ -317,6 +367,8 @@ def train_stage(stage_config, global_epoch_start, model,
 
             pixel_values = batch["pixel_values"].to(device=device, dtype=torch.bfloat16)
             input_ids = batch["input_ids"].to(device=device)
+            decoder_input_ids = batch["decoder_input_ids"].to(device=device)
+            decoder_attention_mask = batch["decoder_attention_mask"].to(device=device)
             attention_mask = batch["attention_mask"].to(device=device)
             labels = batch["labels"].to(device=device)
             qid = batch["qid"]
@@ -338,6 +390,8 @@ def train_stage(stage_config, global_epoch_start, model,
                 input_ids = input_ids,
                 pixel_values = pixel_values,
                 attention_mask = attention_mask,
+                decoder_input_ids = decoder_input_ids,
+                decoder_attention_mask = decoder_attention_mask,
                 labels = labels, # Use for our classification
                 qid = None
             )
@@ -376,7 +430,8 @@ def train_stage(stage_config, global_epoch_start, model,
         if args.output_dir and args.save_ckpt:
             if (epoch + 1) % args.save_ckpt_freq == 0 or (epoch + 1) == args.epochs:
                 my_save_model(args=args, epoch=epoch, model=model, optimizer=optimizer)
-                
+        
+        torch.cuda.empty_cache()
         if data_loader_val is not None:
             val_stats = blip2_evaluate(
                 args, data_loader_val, model, device, task_handler, return_preds=False
@@ -586,9 +641,9 @@ def main(args):
         stage_config = {
             'name': 'Full_Finetune_End_to_End',
             'epochs': args.epochs, 
-            'freeze_vision_model': True,
+            'freeze_vision_model': args.phobert,
             'freeze_language_model': False, 
-            'freeze_embed_tokens': args.freeze_embed_tokens, 
+            'freeze_embed_tokens': False, #args.freeze_embed_tokens, 
             'freeze_qformer': False, 
             'freeze_classifier': False, 
             'freeze_phobert_adapter': False, # Ensure the adapter is trainable
@@ -602,10 +657,17 @@ def main(args):
             }
         }
 
-        optimizer = create_stage_optimizer(model, stage_config, args)
         setup_model_for_stage(model, stage_config)
+        for name, param in model.blip2.language_model.get_input_embeddings().named_parameters():
+            print(f"{name}: {param.requires_grad}")
+
+        optimizer = create_stage_optimizer(model, stage_config, args)
+        
         if args.resume != '':
             model, optimizer, args.start_epoch = my_auto_resume(args, model=model, optimizer=optimizer, device=device)
+
+        for name, param in model.blip2.language_model.get_input_embeddings().named_parameters():
+            print(f"{name}: {param.requires_grad}")
 
         log_model_architecture(model, args.output_dir, stage_config) # Log architecture for standard training too
 

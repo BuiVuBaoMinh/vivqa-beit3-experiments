@@ -26,7 +26,7 @@ class ViVQABlip2Dataset(torch.utils.data.Dataset):
             self.data = json.load(f)
 
         assert args.answer2label is not None, "ViVQABlip2Dataset: answer2label path is required!"
-        self.answer_to_label, self.label_to_answer = self._load_answer_mappings(args.answer2label)
+        self.answer_to_label, self.label_to_answer, self.label_to_vi_answer = self._load_answer_mappings(args.answer2label)
 
         self.image_dir = image_dir
         self.split = split
@@ -34,15 +34,16 @@ class ViVQABlip2Dataset(torch.utils.data.Dataset):
         # If using PhoBERT, the processor will use the provided tokenizer
         if args.phobert and phobert_tokenizer:
             print("Initializing Blip2Processor with custom PhoBERT tokenizer.")
-            self.processor = Blip2Processor.from_pretrained(blip2_model_id, tokenizer=phobert_tokenizer)
+            self.processor = Blip2Processor.from_pretrained(blip2_model_id, tokenizer=phobert_tokenizer, use_fast=True)
         else:
             print("Initializing standard Blip2Processor Processor.")
-            self.processor = Blip2Processor.from_pretrained(blip2_model_id)
+            self.processor = Blip2Processor.from_pretrained(blip2_model_id, use_fast=True)
 
     def _load_answer_mappings(self, file_path):
         """Loads answer-to-label mappings from a file."""
         answer_to_label = {}
         label_to_answer = {}
+        label_to_vi_answer = {}
         with open(file_path, 'r', encoding='utf-8') as f:
             for line in f:
                 item = json.loads(line.strip())
@@ -50,6 +51,9 @@ class ViVQABlip2Dataset(torch.utils.data.Dataset):
                 label = item['label']
                 answer_to_label[answer] = label
                 label_to_answer[label] = answer
+
+                vi_answer = segment_normalize(item['vi_answer'])
+                label_to_vi_answer[label] = vi_answer
         
         if "UNKNOWN" not in answer_to_label:
             new_label = len(answer_to_label)
@@ -57,7 +61,7 @@ class ViVQABlip2Dataset(torch.utils.data.Dataset):
             label_to_answer[new_label] = "UNKNOWN"
 
         print(f"ViVQABlip2Dataset: Loaded {len(answer_to_label)} mappings from {file_path}.")
-        return answer_to_label, label_to_answer
+        return answer_to_label, label_to_answer, label_to_vi_answer
 
     def __len__(self):
         return len(self.data)
@@ -79,10 +83,15 @@ class ViVQABlip2Dataset(torch.utils.data.Dataset):
         answer_str = segment_normalize(item["answer"])
         label = self.answer_to_label.get(answer_str, self.answer_to_label["UNKNOWN"])
 
+        if isinstance(self.processor.tokenizer, PhobertTokenizer):
+            vi_answer_str = self.label_to_vi_answer.get(label, "UNKNOWN")
+            answer_str = vi_answer_str
+
         return {
             "image": image,
             "question": question,
             "labels": label,
+            "answer_str": answer_str,
             "qid": qid
         }
 
@@ -108,12 +117,38 @@ def blip2_collate_fn(batch, processor):
         return_tensors="pt", 
         padding=True,
         truncation=False,
-        max_length=128 
     )
 
     inputs['labels'] = torch.tensor([item['labels'] for item in batch], dtype=torch.long)
     inputs['qid'] = [item['qid'] for item in batch]
     
+    answer_str = [item['answer_str'] for item in batch]
+
+    # Use the tokenizer to prepare decoder inputs
+    # The tokenizer is accessed via processor.tokenizer
+    # decoder_inputs = processor.tokenizer(
+    #     answer_str,
+    #     padding="longest",
+    #     truncation=False,
+    #     return_tensors="pt"
+    # )
+
+    # # These will be passed to the 'decoder_input_ids' and 'decoder_attention_mask'
+    # # arguments of the model's forward pass.
+    # inputs['decoder_input_ids'] = decoder_inputs['input_ids']
+    # inputs['decoder_attention_mask'] = decoder_inputs['attention_mask']
+
+    
+    # Dummy decoder input ids since we are NOT causal generating
+    decoder_input_ids = torch.full(
+        (len(batch), 1),
+        fill_value=processor.tokenizer.pad_token_id,
+        dtype=torch.long
+    )
+    decoder_attention_mask = torch.ones_like(decoder_input_ids, dtype=torch.long)
+    inputs['decoder_input_ids'] = decoder_input_ids
+    inputs['decoder_attention_mask'] = decoder_attention_mask
+
     return inputs
 
 def create_blip2_dataloader(dataset, is_train, batch_size, num_workers, pin_mem):
