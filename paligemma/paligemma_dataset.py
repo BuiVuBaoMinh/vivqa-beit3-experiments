@@ -61,6 +61,10 @@ class ViVQAPaligemmaDataset(torch.utils.data.Dataset):
         self.split = split
         # self.max_length = 290
         self.max_length = 384 # Phobert tokenizes up to 299 tokens
+
+        self.dummy_suffix = None
+        self.dummy_suffix = self.processor.tokenizer.decode(self.processor.tokenizer.pad_token_id)
+        print(f"Paligemma Processor's dummy suffix: {self.dummy_suffix}")
     
     def __len__(self):
         return len(self.data)
@@ -126,8 +130,11 @@ class ViVQAPaligemmaDataset(torch.utils.data.Dataset):
             padding = 'max_length',
             truncation=False,
             max_length=self.max_length,
-            suffix = segment_normalize(item["answer"])
+            suffix = segment_normalize(item["answer"]) if self.dummy_suffix is None else self.dummy_suffix
         )
+
+        # print(self.processor.tokenizer.pad_token_id)
+        # print(self.processor.tokenizer.decode(self.processor.tokenizer.pad_token_id))
 
         pixel_values = inputs['pixel_values'].squeeze(0)
         input_ids = inputs['input_ids'].squeeze(0)

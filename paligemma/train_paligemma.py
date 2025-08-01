@@ -160,7 +160,7 @@ def log_model_architecture(model, output_dir, stage_config):
         f.write(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}\n")
 
         f.write("\n--- Stage Config ---\n")
-        json.dump(stage_config, f, ensure_ascii=False)
+        json.dump(stage_config, f, ensure_ascii=False, indent=4)
 
 def get_resume_stage_index(global_epoch, stages):
     print(f"{global_epoch}")
@@ -606,7 +606,7 @@ def main(args):
         stage_config = {
                 'name': 'Standard End-to-End Training',
                 'epochs': args.epochs,
-                'freeze_paligemma_vision_tower': True,
+                'freeze_paligemma_vision_tower': args.phobert,
                 'freeze_paligemma_language_model': False,
                 'freeze_embed_tokens': args.freeze_embed_tokens,
                 'freeze_classifier': False,
