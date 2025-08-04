@@ -52,14 +52,28 @@ class ViVQAPaligemmaDataset(torch.utils.data.Dataset):
                 self.processor.image_token_id = phobert_tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
                 self.processor.image_token = IMAGE_TOKEN
 
-                phobert_tokenizer.add_tokens(EXTRA_TOKENS)
+                # NOTE: We do NOT add <loc****> and <seg***> tokens (EXTRA_TOKENS) to the PhoBERT tokenizer here.
+                # These tokens are used in some vision-language models (like PaLI-Gemma) for fine-grained grounding:
+                # - <loc****>: Refers to specific image regions or detected object locations.
+                # - <seg***> : Refers to text segments, often used in layout-aware inputs (e.g., document understanding).
+                #
+                # However, our current dataset does NOT contain any input text that references these tokens.
+                # Including 1,154 unused special tokens would unnecessarily increase the PhoBERT vocabulary size
+                # (from 64,000 to 65,154), leading to extra randomly initialized embeddings that:
+                #   - Increase memory usage
+                #   - Add trainable parameters without utility
+                #   - May destabilize fine-tuning
+                #
+                # Therefore, we only add the <image> token, which is required for vision-language fusion,
+                # and we skip adding EXTRA_TOKENS to keep the model compact and focused.
+
+                # phobert_tokenizer.add_tokens(EXTRA_TOKENS)
                 phobert_tokenizer.add_bos_token = False
                 phobert_tokenizer.add_eos_token = False
 
                 self.processor.tokenizer = phobert_tokenizer
 
         self.split = split
-        # self.max_length = 290
         self.max_length = 384 # Phobert tokenizes up to 299 tokens
 
         self.dummy_suffix = None
@@ -92,9 +106,6 @@ class ViVQAPaligemmaDataset(torch.utils.data.Dataset):
                 unique_answers.append(answer)
 
                 answer_to_label[answer] = item['label']
-
-        # assert len(answer_to_label) == len(label_to_answer), \
-        #     f"answer_to_label and label_to_answer dicts mismatch {len(answer_to_label)} vs {len(label_to_answer)}!"
 
         if len(answer_to_label) != len(label_to_answer):
             print(f"Warning: answer_to_label and label_to_answer dicts mismatch {len(answer_to_label)} vs {len(label_to_answer)}!")
@@ -132,9 +143,6 @@ class ViVQAPaligemmaDataset(torch.utils.data.Dataset):
             max_length=self.max_length,
             suffix = segment_normalize(item["answer"]) if self.dummy_suffix is None else self.dummy_suffix
         )
-
-        # print(self.processor.tokenizer.pad_token_id)
-        # print(self.processor.tokenizer.decode(self.processor.tokenizer.pad_token_id))
 
         pixel_values = inputs['pixel_values'].squeeze(0)
         input_ids = inputs['input_ids'].squeeze(0)

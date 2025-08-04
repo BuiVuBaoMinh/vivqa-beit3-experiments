@@ -18,7 +18,7 @@ import bitsandbytes as bnb
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from paligemma import get_vivqa_paligemma, get_vivqa_paligemma_phobert, PaligemmaForVQAClassification
+from paligemma import get_vivqa_paligemma, get_vivqa_paligemma_phobert, get_vivqa_paligemma_phobert_with_adapter, PaligemmaForVQAClassification
 from paligemma_dataset import create_paligemma_datasets
 from my_utils import TrainingF1Score, my_dump_predictions, my_save_model, my_auto_resume
 from paligemma_engine_for_finetuning import PaligemmaHandler, paligemma_evaluate
@@ -185,6 +185,11 @@ def log_paligemma_model_config(model: PaligemmaForVQAClassification, output_dir)
         f.write("\n\n--- Classifier head Dropout ---\n\n")
         f.write(f"nn.DropOut: {model.dropout.p}")
 
+        if hasattr(model, 'phobert_embedding_adapter') and model.phobert_embedding_adapter is not None:
+            f.write("\n\n--- Phobert Adapter Shape ---\n\n")
+            for name, params in model.phobert_embedding_adapter.named_parameters():
+                f.write(f"{name}: {params.shape}\n")
+
 def setup_model_for_stage(model: PaligemmaForVQAClassification, stage_config):
     """Freezes/unfreezes BLIP model parameters based on the stage configuration."""
     print(f"--- Configuring model for stage: {stage_config['name']} ---")
@@ -215,6 +220,11 @@ def setup_model_for_stage(model: PaligemmaForVQAClassification, stage_config):
         for param in model.classifier.parameters():
             param.requires_grad = False
 
+    if hasattr(model, 'phobert_embedding_adapter') and not stage_config.get('freeze_phobert_adapter', True):
+        print("Unfreezing: PhoBERT Embedding Adapter")
+        for param in model.phobert_embedding_adapter.parameters():
+            param.requires_grad = True
+
 def create_stage_optimizer(model: PaligemmaForVQAClassification, stage_config, args):
     """
     Creates a staged optimizer for the Paligemma model, correctly handling both
@@ -237,6 +247,12 @@ def create_stage_optimizer(model: PaligemmaForVQAClassification, stage_config, a
         'classifier': {'params': [], 'lr': lrs['classifier']},
     }
 
+    if hasattr(model, 'phobert_embedding_adapter') and model.phobert_embedding_adapter is not None:
+        components['phobert_adapter'] = {
+            'params': [],
+            'lr': lrs['phobert_adapter']
+        }
+
     # 1. First, assign each parameter to its component group
     for name, param in model.named_parameters():
         if not param.requires_grad:
@@ -250,6 +266,8 @@ def create_stage_optimizer(model: PaligemmaForVQAClassification, stage_config, a
             components['paligemma_language_model']['params'].append((name, param))
         elif 'classifier' in name:
             components['classifier']['params'].append((name, param))
+        elif 'phobert_embedding_adapter' in name:
+            components['phobert_adapter']['params'].append((name, param))
 
     # 2. For each component, create final groups with and without weight decay
     for group_name, component_data in components.items():
@@ -484,7 +502,10 @@ def main(args):
         phobert_tokenizer = PhobertTokenizer.from_pretrained("vinai/phobert-base-v2", use_fast=True)
 
     if args.phobert:
-        model = get_vivqa_paligemma_phobert(device=device, answer2label_path=args.answer2label).to(device, non_blocking=True, dtype=dtype)
+        # model = get_vivqa_paligemma_phobert(device=device, answer2label_path=args.answer2label).to(device, non_blocking=True, dtype=dtype)
+        model = get_vivqa_paligemma_phobert_with_adapter(
+            device=device, answer2label_path=args.answer2label
+        ).to(device, non_blocking=True, dtype=dtype)    
     else:
         model = get_vivqa_paligemma(device = device, answer2label_path=args.answer2label).to(device, non_blocking=True, dtype=dtype)
 
@@ -610,11 +631,13 @@ def main(args):
                 'freeze_paligemma_language_model': False,
                 'freeze_embed_tokens': args.freeze_embed_tokens,
                 'freeze_classifier': False,
+                'freeze_phobert_adapter': False,
                 'lrs': {
                     'paligemma_vision_tower': 2e-5,
                     'paligemma_language_model': 2e-5,
                     'classifier': 2e-5,
-                    'embed_tokens': 1e-6 # <<< Use a very small LR
+                    'embed_tokens': 1e-6, # <<< Use a very small LR
+                    'phobert_adapter': 5e-5
                 }
             }
 
