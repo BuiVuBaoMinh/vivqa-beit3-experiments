@@ -5,6 +5,7 @@ import os
 import torch
 import torch.nn as nn
 from transformers import (
+    AutoModel,
     PaliGemmaModel, PaliGemmaPreTrainedModel, PaliGemmaConfig, PaliGemmaForConditionalGeneration,
     Gemma2Model, SiglipVisionModel,
     PhobertTokenizer, RobertaModel
@@ -362,6 +363,126 @@ def get_vivqa_paligemma_phobert_with_adapter(
     paligemma_model.use_phobert_adapter = True
 
     print(f"Replaced LM embeddings. New embedding shape: {paligemma_model.paligemma.language_model.get_input_embeddings().weight.shape}")
+    print("✅ PhoBERT embedding transplant with adapter is ready!")
+
+    print("\nUpdating model configuration with new special token IDs...")
+    # Update all relevant token IDs
+    paligemma_model.paligemma.language_model.config.bos_token_id = phobert_tokenizer.bos_token_id
+    paligemma_model.paligemma.language_model.config.eos_token_id = phobert_tokenizer.eos_token_id
+    paligemma_model.paligemma.language_model.config.pad_token_id = phobert_tokenizer.pad_token_id
+    
+    # Also update the top-level config for consistency
+    paligemma_model.config.pad_token_id = phobert_tokenizer.pad_token_id
+    paligemma_model.config.text_config.pad_token_id = phobert_tokenizer.pad_token_id
+    paligemma_model.config.image_token_index = image_token_id # Note: Paligemma uses image_token_index
+    paligemma_model.config.image_token_id = image_token_id
+
+    print("✅ PhoBERT embedding transplant with adapter successful!")
+    
+    del phobert_model
+    del phobert_tokenizer
+    
+    return paligemma_model
+
+
+def get_vivqa_paligemma_phobert_with_adapter_dev(
+    paligemma_model_id=PALIGEMMA_MODEL_ID,
+    phobert_id=PHOBERT_MODEL_ID,
+    num_labels=336,
+    answer2label_path=None,
+    device="cuda"
+):
+    print("Loading PhoBERT model and tokenizer...")
+    phobert_model = AutoModel.from_pretrained(phobert_id, cache_dir=MY_CACHE_DIR)
+    phobert_tokenizer = PhobertTokenizer.from_pretrained(phobert_id, cache_dir=MY_CACHE_DIR)
+
+    custom_paligemma_config = PaliGemmaConfig.from_pretrained(paligemma_model_id, cache_dir=MY_CACHE_DIR)
+
+    # Add special tokens to the PhoBERT tokenizer.
+    if not hasattr(phobert_tokenizer, "image_token"):
+        image_token = AddedToken(IMAGE_TOKEN, normalized=False, special=True)
+        tokens_to_add = {"additional_special_tokens": [image_token]}
+        phobert_tokenizer.add_special_tokens(tokens_to_add)
+        # NOTE: We do NOT add <loc****> and <seg***> tokens (EXTRA_TOKENS) to the PhoBERT tokenizer here.
+                # These tokens are used in some vision-language models (like PaLI-Gemma) for fine-grained grounding:
+                # - <loc****>: Refers to specific image regions or detected object locations.
+                # - <seg***> : Refers to text segments, often used in layout-aware inputs (e.g., document understanding).
+                #
+                # However, our current dataset does NOT contain any input text that references these tokens.
+                # Including 1,154 unused special tokens would unnecessarily increase the PhoBERT vocabulary size
+                # (from 64,000 to 65,154), leading to extra randomly initialized embeddings that:
+                #   - Increase memory usage
+                #   - Add trainable parameters without utility
+                #   - May destabilize fine-tuning
+                #
+                # Therefore, we only add the <image> token, which is required for vision-language fusion,
+                # and we skip adding EXTRA_TOKENS to keep the model compact and focused.
+
+                # phobert_tokenizer.add_tokens(EXTRA_TOKENS)
+        phobert_tokenizer.add_bos_token = False
+        phobert_tokenizer.add_eos_token = False
+    image_token_id = phobert_tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
+    print(f"Added '<image>' token to PhoBERT tokenizer with id: {image_token_id}. New vocab size: {len(phobert_tokenizer)}")
+
+    # Get a standard Paligemma VQA model
+    paligemma_model = get_vivqa_paligemma(
+        paligemma_model_id=paligemma_model_id,
+        num_labels=num_labels,
+        answer2label_path=answer2label_path,
+        device=device
+    )
+
+    # Initialize the adapter
+    phobert_hidden_size = phobert_model.config.hidden_size # 768
+    paligemma_hidden_size = paligemma_model.config.text_config.hidden_size # e.g., 2304
+    paligemma_model.phobert_embedding_adapter = nn.Linear(phobert_hidden_size, paligemma_hidden_size)
+
+    print("\nReplacing Paligemma's LM embeddings with PhoBERT's and enabling adapter...")
+    
+    # Get PhoBERT's word embedding layer
+    # source_embeddings = phobert_model.embeddings.word_embeddings
+    source_embeddings = phobert_model.embeddings
+    
+    # Set the entire language model's input embedding layer to be PhoBERT's
+    paligemma_model.paligemma.language_model.set_input_embeddings(source_embeddings)
+    print(f"Swapped embedding layer. New embedding dimension: {paligemma_model.paligemma.get_input_embeddings()}")
+
+    new_vocab_size = len(phobert_tokenizer)
+    # Target the parent module that holds the word_embeddings layer
+    embedding_module = paligemma_model.paligemma.get_input_embeddings()
+
+    # Get the original word embedding layer
+    old_word_embeddings = embedding_module.word_embeddings
+    old_num_tokens, embedding_dim = old_word_embeddings.weight.shape
+
+    # Only resize if the new size is different
+    if old_num_tokens != new_vocab_size:
+        print(f"Manually resizing word embeddings from {old_num_tokens} to {new_vocab_size}...")
+        
+        # 1. Create a new embedding layer with the correct new size
+        new_word_embeddings = torch.nn.Embedding(
+            num_embeddings=new_vocab_size,
+            embedding_dim=embedding_dim,
+            # Ensure the new layer is on the same device and has the same dtype
+            device=old_word_embeddings.weight.device,
+            dtype=old_word_embeddings.weight.dtype,
+            padding_idx=old_word_embeddings.padding_idx
+        )
+
+    # 2. Copy the old weights into the new layer's weight matrix
+    # The new tokens will have randomly initialized weights
+    new_word_embeddings.weight.data[:old_num_tokens, :] = old_word_embeddings.weight.data
+
+    # 3. Replace the old embedding layer with our new, resized layer
+    embedding_module.word_embeddings = new_word_embeddings
+    # Update the model's config to reflect the new vocab size from PhoBERT
+    paligemma_model.paligemma.language_model.config.vocab_size = len(phobert_tokenizer)
+    paligemma_model.config.text_config.vocab_size = len(phobert_tokenizer)
+    
+    # Activate the adapter in the forward pass
+    paligemma_model.use_phobert_adapter = True
+
+    # print(f"Replaced LM embeddings. New embedding shape: {paligemma_model.paligemma.language_model.get_input_embeddings().weight.shape}")
     print("✅ PhoBERT embedding transplant with adapter is ready!")
 
     print("\nUpdating model configuration with new special token IDs...")

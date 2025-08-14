@@ -16,13 +16,14 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import utils
 from glossary import segment_normalize
+from GemmaFitPhobertTokenizer import GemmaFitPhobertTokenizer
 
 
 def remove_under_score(text: str):
     return text.replace("_", " ")
-
+        
 class ViVQAPaligemmaProcessor(PaliGemmaProcessor):
-    tokenizer_class = ("GemmaTokenizer", "GemmaTokenizerFast", "PhobertTokenizer")
+    tokenizer_class = ("GemmaTokenizer", "GemmaTokenizerFast", "GemmaFitPhobertTokenizer")
 
     def __init__(self, image_processor, tokenizer, **kwargs):
         super().__init__(image_processor, tokenizer, **kwargs)
@@ -32,7 +33,7 @@ class ViVQAPaligemmaDataset(torch.utils.data.Dataset):
                  args,
                  json_path, image_dir, split,
                  paligemma_model_id="google/paligemma2-3b-pt-224",
-                 phobert_tokenizer: PhobertTokenizer = None):
+                 phobert_tokenizer: GemmaFitPhobertTokenizer = None):
         
         with open(json_path, "r", encoding="utf-8") as f:
             self.data = json.load(f)
@@ -74,7 +75,8 @@ class ViVQAPaligemmaDataset(torch.utils.data.Dataset):
                 self.processor.tokenizer = phobert_tokenizer
 
         self.split = split
-        self.max_length = 384 # Phobert tokenizes up to 299 tokens
+        self.max_length = 300
+        # self.max_length = 258 # PhoBERT's positional embeds 258 positions maximum
 
         self.dummy_suffix = None
         self.dummy_suffix = self.processor.tokenizer.decode(self.processor.tokenizer.pad_token_id)
@@ -139,10 +141,23 @@ class ViVQAPaligemmaDataset(torch.utils.data.Dataset):
             images = image,
             return_tensors = "pt",
             padding = 'max_length',
-            truncation=False,
+            truncation= False,
             max_length=self.max_length,
             suffix = segment_normalize(item["answer"]) if self.dummy_suffix is None else self.dummy_suffix
         )
+
+        # --- ADD THIS DEBUGGING CODE ---
+        # Use the tokenizer inside the processor to decode the input_ids
+        # .squeeze(0) removes the batch dimension for a single item
+        # decoded_text = self.processor.tokenizer.decode(
+        #     inputs['input_ids'].squeeze(0), 
+        #     skip_special_tokens=False # Set to False to see all special tokens
+        # )
+        # print("--- Decoded Input ---")
+        # print(decoded_text)
+        # print(f"Length: {len(inputs['input_ids'].squeeze(0))}") # Verify the length
+        # print("---------------------")
+        # --- END DEBUGGING CODE ---
 
         pixel_values = inputs['pixel_values'].squeeze(0)
         input_ids = inputs['input_ids'].squeeze(0)

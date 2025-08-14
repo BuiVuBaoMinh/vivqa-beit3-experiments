@@ -46,6 +46,7 @@ class PaligemmaHandler(object):
         
         try:
             # Get model output from a single forward pass
+
             outputs = model(
                 input_ids = input_ids,
                 pixel_values = pixel_values,

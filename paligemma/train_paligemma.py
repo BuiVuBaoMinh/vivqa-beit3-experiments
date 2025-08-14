@@ -18,10 +18,12 @@ import bitsandbytes as bnb
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from paligemma import get_vivqa_paligemma, get_vivqa_paligemma_phobert, get_vivqa_paligemma_phobert_with_adapter, PaligemmaForVQAClassification
+from paligemma import get_vivqa_paligemma, get_vivqa_paligemma_phobert, get_vivqa_paligemma_phobert_with_adapter, get_vivqa_paligemma_phobert_with_adapter_dev, PaligemmaForVQAClassification
 from paligemma_dataset import create_paligemma_datasets
 from my_utils import TrainingF1Score, my_dump_predictions, my_save_model, my_auto_resume
 from paligemma_engine_for_finetuning import PaligemmaHandler, paligemma_evaluate
+
+from GemmaFitPhobertTokenizer import GemmaFitPhobertTokenizer
 
 import utils
 from optim_factory import create_optimizer, LayerDecayValueAssigner, get_is_head_flag_for_vit
@@ -212,15 +214,16 @@ def setup_model_for_stage(model: PaligemmaForVQAClassification, stage_config):
 
     if stage_config.get('freeze_embed_tokens', True):
         print("PhoBERT transplanted word embeddings (paligemma's embed_tokens) are FROZEN.")
-        for param in model.paligemma.language_model.embed_tokens.parameters():
-            param.requires_grad = False
+        for name, param in model.paligemma.language_model.embed_tokens.named_parameters():
+            if "word_embeddings" not in name:
+                param.requires_grad = False
 
     if stage_config.get('freeze_classifier', True):
         print("Classifier head is FROZEN.")
         for param in model.classifier.parameters():
             param.requires_grad = False
 
-    if hasattr(model, 'phobert_embedding_adapter') and not stage_config.get('freeze_phobert_adapter', True):
+    if model.phobert_embedding_adapter and not stage_config.get('freeze_phobert_adapter', True):
         print("Unfreezing: PhoBERT Embedding Adapter")
         for param in model.phobert_embedding_adapter.parameters():
             param.requires_grad = True
@@ -499,13 +502,16 @@ def main(args):
     phobert_tokenizer = None
 
     if args.phobert:
-        phobert_tokenizer = PhobertTokenizer.from_pretrained("vinai/phobert-base-v2", use_fast=True)
+        phobert_tokenizer = GemmaFitPhobertTokenizer.from_pretrained("vinai/phobert-base-v2", use_fast=True)
 
     if args.phobert:
         # model = get_vivqa_paligemma_phobert(device=device, answer2label_path=args.answer2label).to(device, non_blocking=True, dtype=dtype)
+        # model = get_vivqa_paligemma_phobert_with_adapter_dev(
+        #     device=device, answer2label_path=args.answer2label
+        # ).to(device, non_blocking=True, dtype=dtype)
         model = get_vivqa_paligemma_phobert_with_adapter(
             device=device, answer2label_path=args.answer2label
-        ).to(device, non_blocking=True, dtype=dtype)    
+        ).to(device, non_blocking=True, dtype=dtype)
     else:
         model = get_vivqa_paligemma(device = device, answer2label_path=args.answer2label).to(device, non_blocking=True, dtype=dtype)
 
@@ -627,7 +633,7 @@ def main(args):
         stage_config = {
                 'name': 'Standard End-to-End Training',
                 'epochs': args.epochs,
-                'freeze_paligemma_vision_tower': args.phobert,
+                'freeze_paligemma_vision_tower': True,  # args.phobert,
                 'freeze_paligemma_language_model': False,
                 'freeze_embed_tokens': args.freeze_embed_tokens,
                 'freeze_classifier': False,
