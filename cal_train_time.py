@@ -1,7 +1,7 @@
 import json
 
 # Path to your log file and the report file
-log_file = "/home/lenovo/exp1/output-dir/log.txt"
+log_file = "/home/21khac.dd/bm/beit3-lora-3/log.txt"
 report_file = "training_report.txt"
 
 # Initialize variables to track total time and time per epoch

@@ -610,18 +610,28 @@ class ViVQADataset(BaseDataset):
     @classmethod
     def make_dataset_index(cls, data_path, tokenizer_spm, tokenizer_phobert, annotation_data_path, predefined_dict_path=None):
 
-        with open(os.path.join(annotation_data_path, "train_vi.json"), "r") as fp:
+        with open(os.path.join(annotation_data_path, "train_vi_full.json"), "r") as fp:
             train_vivqa_vi = json.load(fp)
         with open(os.path.join(annotation_data_path, "test_vi.json"), "r") as fp:
             test_vivqa_vi = json.load(fp)
 
-        with open(os.path.join(annotation_data_path, "train_en.json"), "r") as fp:
+        with open(os.path.join(annotation_data_path, "train_en_full.json"), "r") as fp:
             train_vivqa_en = json.load(fp)
         with open(os.path.join(annotation_data_path, "test_en.json"), "r") as fp:
             test_vivqa_en = json.load(fp)
 
         # Split 1000 examples from train set as validation (since no val split is provided)
         print(f"Total annotations from train: vi-{len(train_vivqa_vi)}, en-{len(train_vivqa_en)}")
+
+        # Shuffle together
+        combined = list(zip(train_vivqa_vi, train_vivqa_en))
+        random.shuffle(combined)
+        train_vivqa_vi, train_vivqa_en = zip(*combined)
+
+        # Convert back to list
+        train_vivqa_vi = list(train_vivqa_vi)
+        train_vivqa_en = list(train_vivqa_en)
+
         val_vivqa_vi = train_vivqa_vi[:1000]
         train_vivqa_vi = train_vivqa_vi[1000:]
 
@@ -763,6 +773,7 @@ class ViVQADataset(BaseDataset):
                 for qid in _annot_vi:
                     q_vi = _annot_vi[qid]
                     q_en = _annot_en[qid]
+
                     if split in ["train", "val"]:
                         labels = q_vi["labels"]
                         scores = q_vi["scores"]
@@ -784,6 +795,7 @@ class ViVQADataset(BaseDataset):
                         "scores": scores, 
                         "qid": qid, 
                     })
+
             split2items_vi[split] = items_vi
             split2items_en[split] = items_en
 
@@ -822,13 +834,13 @@ class ViVQADataset(BaseDataset):
         _write_data_into_jsonl(items=trainable_val_en, jsonl_file=os.path.join(data_path, "vivqa_en.trainable_val.jsonl"))
         _write_data_into_jsonl(items=rest_val_en, jsonl_file=os.path.join(data_path, "vivqa_en.rest_val.jsonl"))
 
-        with open(os.path.join(data_path, "answer2label.txt"), mode="w", encoding="utf-8") as writer:
-            for ans in ans2label:
-                to_json = {
-                    "answer": ans, 
-                    "label": ans2label[ans]
-                }
-                writer.write("%s\n" % json.dumps(to_json, ensure_ascii=False))
+        # with open(os.path.join(data_path, "answer2label.txt"), mode="w", encoding="utf-8") as writer:
+        #     for ans in ans2label:
+        #         to_json = {
+        #             "answer": ans, 
+        #             "label": ans2label[ans]
+        #         }
+        #         writer.write("%s\n" % json.dumps(to_json, ensure_ascii=False))
         
 class OpenViVQADataset(BaseDataset):
     def __init__(self, data_path, **kwargs):
@@ -1325,6 +1337,7 @@ def create_dataset_by_split(args, split, is_train=True, phobert_tokenizer=None):
 def create_downstream_dataset(args, is_eval=False, phobert_tokenizer=None):
     if is_eval:
         return create_dataset_by_split(args, split="test", is_train=False, phobert_tokenizer=phobert_tokenizer)
+        # return create_dataset_by_split(args, split="test", is_train=True, phobert_tokenizer=phobert_tokenizer)
     else:
         return \
             create_dataset_by_split(args, split="train", is_train=True, phobert_tokenizer=phobert_tokenizer), \

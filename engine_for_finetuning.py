@@ -591,7 +591,6 @@ def train_one_epoch(
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
-
 @torch.no_grad()
 def evaluate(data_loader, model, device, handler):
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -605,7 +604,9 @@ def evaluate(data_loader, model, device, handler):
         for tensor_key in data.keys():
             data[tensor_key] = data[tensor_key].to(device, non_blocking=True)
 
-        with torch.cuda.amp.autocast():
+        # with torch.cuda.amp.autocast():
+        #     handler.eval_batch(model=model, **data)
+        with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
             handler.eval_batch(model=model, **data)
 
     # gather the stats from all processes

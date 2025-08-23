@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import copy
+import re
 
 from pathlib import Path
 
@@ -32,6 +33,54 @@ import modeling_finetune
 
 import torch
 from transformers import AutoModel, AutoTokenizer
+
+import loralib as lora
+
+def verify_model_weights(model, epoch_str=""):
+    """Prints checksums of key model weights for debugging."""
+    print(f"\n--- Verifying weights for epoch: {epoch_str} ---")
+    try:
+        # 1. A LoRA weight (should be trained)
+        lora_weight = model.beit3.encoder.layers[0].self_attn.q_proj.A.lora_A
+        print(f"LORA Weight Checksum (q_proj.A.lora_A): {torch.sum(lora_weight).item()}")
+
+        # 2. An original, frozen weight (should be from the --finetune checkpoint)
+        original_weight = model.beit3.encoder.layers[0].self_attn.q_proj.A.weight
+        print(f"Base Weight Checksum (q_proj.A.weight): {torch.sum(original_weight).item()}")
+
+        # 3. The transplanted PhoBERT embedding (should be trained)
+        phobert_embed = model.beit3.text_embed.weight
+        print(f"PhoBERT Embed Checksum: {torch.sum(phobert_embed).item()}")
+
+        # 4. The classification head (should be trained)
+        head_weight = model.head[3].weight
+        print(f"Head Weight Checksum: {torch.sum(head_weight).item()}")
+
+    except AttributeError as e:
+        print(f"Could not access a weight for verification: {e}")
+    print("--- Verification complete ---\n")
+
+def debug_data_batch(data_loader, batch_name=""):
+    """Pulls one batch and prints its tensor statistics for debugging."""
+    print(f"\n--- Debugging one batch from: {batch_name} ---")
+    try:
+        # Get the first batch from the data loader
+        data = next(iter(data_loader))
+
+        # Check language tokens
+        lang_tokens = data['language_tokens']
+        print(f"Language Tokens Shape: {lang_tokens.shape}")
+        print(f"Language Tokens (first sample, 15 tokens): \n{lang_tokens[0, :15]}")
+
+        # Check image tensor stats
+        image = data['image']
+        print(f"Image Shape: {image.shape}")
+        print(f"Image Mean: {image.mean().item():.4f}")
+        print(f"Image Std Dev: {image.std().item():.4f}")
+
+    except Exception as e:
+        print(f"Error during data batch debugging: {e}")
+    print("--- Debug complete ---\n")
 
 
 def get_args():
@@ -207,7 +256,23 @@ def get_args():
                         help="Specify whether replacing the phobert's tokenizer and embedding layers or not")
     parser.add_argument('--patience', type=int, default=5,
                         help='Number of training epochs without improvements.')
+    parser.add_argument('--early_stopping', type=str, default='val_score',
+                        help="Determine the early stopping criteria. Supports val_score and val_loss")
 
+
+    # --- LORA ---
+    parser.add_argument('--enable_lora', action='store_true', default=False,
+                        help='Enable LoRA for parameter-efficient finetuning.')
+    parser.add_argument('--lora_r', type=int, default=8,
+                        help='LoRA rank.')
+    parser.add_argument('--lora_alpha', type=int, default=16,
+                        help='LoRA alpha scaling factor.')
+    parser.add_argument('--lora_dropout', type=float, default=0.05,
+                        help='LoRA dropout.')
+    parser.add_argument('--lora_target_modules', type=str, nargs='+',
+                        default=['q_proj', 'v_proj'],
+                        help='List of module names to apply LoRA to.')
+    
     known_args, _ = parser.parse_known_args()
 
     if known_args.enable_deepspeed:
@@ -216,13 +281,42 @@ def get_args():
             from deepspeed import DeepSpeedConfig
             parser = deepspeed.add_config_arguments(parser)
             ds_init = deepspeed.initialize
-        except:
-            print("Please 'pip install deepspeed==0.4.0'")
-            exit(0)
+        except Exception as e:
+            print("Failed to import deepspeed:")
+            print(e)
+            import traceback
+            traceback.print_exc()
+            exit(1)
+        # except:
+        #     print("Please 'pip install deepspeed==0.4.0'")
+        #     exit(0)
     else:
         ds_init = None
 
     return parser.parse_args(), ds_init
+
+def log_model_arch(args, model, config_name):
+    with open(args.output_dir + "/" + config_name + ".txt", "w") as f:
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                f.write(f"Frozen {param.shape}: {name}\n")
+            else:
+                f.write(f"Trainable {param.shape}: {name}\n")
+
+        total_params = sum(p.numel() for p in model.parameters())
+        frozen_params = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+        n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+        f.write(f"\n\nTotal params: {total_params}\n")
+        f.write(f"Frozen params: {frozen_params}\n")
+        f.write(f"Trainable params: {n_parameters}\n")
+
+        if args.enable_lora:
+            f.write(f"\n\n LoRA SETTINGS\n")
+            f.write(f"\n\n - Rank: {args.lora_r}\n")
+            f.write(f"\n\n - Alpha: {args.lora_alpha}\n")
+            f.write(f"\n\n - Dropout: {args.lora_dropout}\n")
+            f.write(f"\n\n - Target Modeuls: {args.lora_target_modules}\n")
 
 
 def main(args, ds_init):
@@ -274,6 +368,8 @@ def main(args, ds_init):
     else:
         model_config = args.model
     print("model_config = %s" % model_config)
+
+    # --- 1. CREATE THE BASE MODEL ---
     model = create_model(
         model_config,
         pretrained=False,
@@ -282,77 +378,143 @@ def main(args, ds_init):
         checkpoint_activations=args.checkpoint_activations,
     )
 
+    # --- 2. LOAD ORIGINAL PRE-TRAINED WEIGHTS (if starting a new run) ---
+    # This is for the very first run, to load the base BEiT-3 weights.
     if args.finetune:
         utils.load_model_and_may_interpolate(args.finetune, model, args.model_key, args.model_prefix)
 
+    log_model_arch(args, model, "base_BEiT3")
+
+    # --- 3. INJECT LoRA AND SWAP EMBEDDINGS ---
+    # --- LORA-START ---
+    # if args.enable_lora:
+    #     if lora is None:
+    #         raise RuntimeError("loralib is not installed, cannot enable LoRA.")
+    #     print(f"Applying LoRA with r={args.lora_r}, alpha={args.lora_alpha}")
+    #     print(f"Target modules: {args.lora_target_modules}")
+        
+    #     # This regex will match the parent MultiwayNetwork module names (e.g., "q_proj", "v_proj")
+    #     pattern = r".*\.(" + "|".join(args.lora_target_modules) + r")$"
+        
+    #     replaced_count = 0
+    #     # Iterate through the model's modules to find the MultiwayNetworks
+    #     for name, module in model.named_modules():
+    #         if re.match(pattern, name):
+    #             # Check if this module is a MultiwayNetwork containing Linear layers 'A' and 'B'
+    #             if hasattr(module, 'A') and hasattr(module, 'B') and \
+    #             isinstance(module.A, torch.nn.Linear) and isinstance(module.B, torch.nn.Linear):
+                    
+    #                 # --- Replace the internal 'A' linear layer ---
+    #                 old_linear_A = module.A
+    #                 new_linear_A = lora.Linear(
+    #                     in_features=old_linear_A.in_features,
+    #                     out_features=old_linear_A.out_features,
+    #                     bias=old_linear_A.bias is not None,
+    #                     r=args.lora_r,
+    #                     lora_alpha=args.lora_alpha,
+    #                     lora_dropout=args.lora_dropout,
+    #                 )
+    #                 module.A = new_linear_A # Replace in-place
+                    
+    #                 # --- Replace the internal 'B' linear layer ---
+    #                 old_linear_B = module.B
+    #                 new_linear_B = lora.Linear(
+    #                     in_features=old_linear_B.in_features,
+    #                     out_features=old_linear_B.out_features,
+    #                     bias=old_linear_B.bias is not None,
+    #                     r=args.lora_r,
+    #                     lora_alpha=args.lora_alpha,
+    #                     lora_dropout=args.lora_dropout,
+    #                 )
+    #                 module.B = new_linear_B # Replace in-place
+                    
+    #                 # We replaced two linear layers (A and B) for each target
+    #                 replaced_count += 2
+
+    #     if replaced_count == 0:
+    #         raise ValueError(
+    #             f"Could not find any 'MultiwayNetwork' modules with Linear submodules 'A' and 'B' "
+    #             f"matching the target patterns: {args.lora_target_modules}. "
+    #             "This script is now specifically tailored for BEiT-3's Multiway attention structure."
+    #         )
+
+    #     print(f"Successfully replaced {replaced_count} internal linear layers with LoRA layers.")
+
+    #     log_model_arch(args, model, "BEiT-3-LoRA")
+    # # --- LORA-END ---
+
+    # --- LORA-START ---
+    if args.enable_lora:
+        if lora is None:
+            raise RuntimeError("loralib is not installed, cannot enable LoRA.")
+        print(f"Applying LoRA with r={args.lora_r}, alpha={args.lora_alpha}")
+        print(f"Target modules: {args.lora_target_modules}")
+        
+        # Find all nn.Linear layers in the model that should be replaced
+        modules_to_replace = []
+        for name, module in model.named_modules():
+            # The name of a linear layer submodule could be, e.g., 'beit3.encoder.layers.0.self_attn.q_proj.A'
+            # We check if the target keyword (e.g., 'q_proj') is part of its full name.
+            if isinstance(module, torch.nn.Linear) and any(target in name for target in args.lora_target_modules):
+                # To replace the submodule, we need to get its parent module and its name (the last part of the path)
+                path_parts = name.split('.')
+                parent_name = '.'.join(path_parts[:-1])
+                child_name = path_parts[-1]
+                parent_module = model.get_submodule(parent_name)
+                
+                modules_to_replace.append((parent_module, child_name, module))
+
+        if not modules_to_replace:
+            raise ValueError(
+                f"Could not find any torch.nn.Linear modules whose names contain "
+                f"the target keywords: {args.lora_target_modules}."
+            )
+
+        # Now, perform the actual replacement
+        for parent_module, child_name, old_linear in modules_to_replace:
+            new_linear = lora.Linear(
+                in_features=old_linear.in_features,
+                out_features=old_linear.out_features,
+                bias=old_linear.bias is not None,
+                r=args.lora_r,
+                lora_alpha=args.lora_alpha,
+                lora_dropout=args.lora_dropout,
+            )
+            # Set the new lora.Linear layer on the parent module
+            setattr(parent_module, child_name, new_linear)
+            
+        print(f"Successfully replaced {len(modules_to_replace)} internal linear layers with LoRA layers.")
+        log_model_arch(args, model, "BEiT-3-LoRA")
+    # --- LORA-END ---
+
+    if args.enable_lora:
+        print("Marking only LoRA parameters as trainable.")
+        lora.mark_only_lora_as_trainable(model)
+
     if args.task == 'vivqa' and args.phobert:
 
-        # new_layer = phobert_model.embeddings.word_embeddings
-        new_layer = phobert_model.embeddings
+        new_layer = phobert_model.embeddings.word_embeddings
+        # new_layer = phobert_model.embeddings
         # Replace tokenizer
         print("Replacing original beit3 text_embed w/ PhoBERT's...\n")
-        print("Phobert embedding: ", new_layer)
-        print("Beit3 embedding: ", model.beit3.text_embed)
 
         model.beit3.text_embed = new_layer
 
-        # Print the class of phobert tokenizer
-        print("Phobert embedding class: ", type(new_layer))
-        print("Beit3 embedding class: ", type(new_layer))
-
-        # Strat 0: Only replace the text embed, train all layers.
-        # print("Strat 0: Finetune train all layers!")
-
-        # Strat 1: Freeze all except text embed and text (B) experts, pooler, head
-        # for name, param in model.named_parameters():
-        #     # Freeze vision-embedding and A-expert parameters (do not train)
-        #     if name.startswith("beit3.vision_embed") or ".A." in name:
-        #         param.requires_grad = False
-        #     # Allow training of text embedding and B-expert parameters
-        #     elif name.startswith("beit3.text_embed") or ".B." in name:
-        #         param.requires_grad = True
-        #     elif name.startswith("pooler") or name.startswith("head"):
-        #         param.requires_grad = True
-        #     else:
-        #         param.requires_grad = False
-
-        # Strat 2: Freeze all except text (B) experts, pooler, head
-        # Question: "The text embedding from phobert is pretrained on vi, do we need to finetune it? Let's freeze"
-        for name, param in model.named_parameters():
-            # Freeze vision-embedding and A-expert parameters (do not train)
-            if name.startswith("beit3.vision_embed") or ".A." in name:
-                param.requires_grad = False
-            # Allow training of text embedding and B-expert parameters
-            elif ".B." in name:
-                param.requires_grad = True
-            elif name.startswith("pooler") or name.startswith("head"):
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
+    # --- 5. SET TRAINABLE PARAMETERS ---
+    for param in model.beit3.text_embed.parameters():
+        param.requires_grad = True
+    for param in model.head.parameters():
+        param.requires_grad = True
+    for param in model.pooler.parameters():
+        param.requires_grad = True
+    for param in model.beit3.vision_embed.parameters():
+        param.requires_grad = True
 
     # Check the frozen parameters
-    with open(args.output_dir + "/Model_Architecture.txt", "w") as f:
-        for name, param in model.named_parameters():
-            if not param.requires_grad:
-                print(f"Frozen parameter block: {name}")
-                f.write(f"Frozen parameter block: {name}\n")
-            else:
-                print(f"Trainable parameter block: {name}")
-                f.write(f"Trainable parameter block: {name}\n")
-
-    with open(args.output_dir + "/Paramaters.txt", "w") as f:
-        print(f"Replaced beit3 text_embed w/ PhoBERT's. Checking trainable params.\n")
-        total_params = sum(p.numel() for p in model.parameters())
-        frozen_params = sum(p.numel() for p in model.parameters() if not p.requires_grad)
-        n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-        print(f"Total params: {total_params}\n")
-        print(f"Frozen params: {frozen_params}\n")
-        print(f"Trainable params: {n_parameters}\n")
-
-        f.write(f"Total params: {total_params}\n")
-        f.write(f"Frozen params: {frozen_params}\n")
-        f.write(f"Trainable params: {n_parameters}\n")
+    if args.phobert:
+        log_model_arch(args, model, "BEiT-3-LoRA-XPho")
+    else:
+        log_model_arch(args, model, "BEiT-3-XPho")
 
     model.to(device)
 
@@ -380,17 +542,25 @@ def main(args, ds_init):
     print("Number of training examples = %d" % len(data_loader_train.dataset))
     print("Number of training training per epoch = %d" % num_training_steps_per_epoch)
 
-    num_layers = model_without_ddp.get_num_layers()
-    if args.layer_decay < 1.0:
-        lrs = list(args.layer_decay ** (num_layers + 1 - i) for i in range(num_layers + 2))
-        assigner = LayerDecayValueAssigner(lrs)
-    elif args.task_head_lr_weight > 1:
-        assigner = LayerDecayValueAssigner([1.0, args.task_head_lr_weight], scale_handler=get_is_head_flag_for_vit)
-    else:
+    # --- LORA-START ---
+    # Layer decay is not meaningful for LoRA, as we are not fine-tuning the original layers.
+    # Disable it to avoid potential conflicts and simplify the optimizer setup.
+    if args.enable_lora:
+        print("LoRA is enabled. Disabling Layer Decay.")
         assigner = None
+    else:
+        num_layers = model_without_ddp.get_num_layers()
+        if args.layer_decay < 1.0:
+            lrs = list(args.layer_decay ** (num_layers + 1 - i) for i in range(num_layers + 2))
+            assigner = LayerDecayValueAssigner(lrs)
+        elif args.task_head_lr_weight > 1:
+            assigner = LayerDecayValueAssigner([1.0, args.task_head_lr_weight], scale_handler=get_is_head_flag_for_vit)
+        else:
+            assigner = None
+    # --- LORA-END ---
 
-    if assigner is not None:
-        print("Assigned values = %s" % str(assigner.values))
+    # if assigner is not None:
+    #     print("Assigned values = %s" % str(assigner.values))
 
     skip_weight_decay_list = model.no_weight_decay()
 
@@ -412,6 +582,7 @@ def main(args, ds_init):
     else:
         if args.distributed:
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
+            model._set_static_graph()
             model_without_ddp = model.module
 
         optimizer = create_optimizer(
@@ -430,7 +601,6 @@ def main(args, ds_init):
         optimizer=optimizer, loss_scaler=loss_scaler, model_ema=model_ema)
 
     task_handler = get_handler(args)
-    safe_eval_handler = copy.deepcopy(task_handler)
 
     # mixup for imagenet
     mixup_fn = None
@@ -446,39 +616,26 @@ def main(args, ds_init):
 
     if args.eval:
         data_loader_test = create_downstream_dataset(args, is_eval=True, phobert_tokenizer=phobert_tokenizer)
-        if args.task in ["nlvr2", "flickr30k", "coco_retrieval", "imagenet"]:
-            ext_test_stats, task_key = evaluate(data_loader_test, model, device, task_handler)
-            print(f"Accuracy of the network on the {len(data_loader_test.dataset)} test images: {ext_test_stats[task_key]:.3f}%")
-            exit(0)
-        elif args.task == "vqav2":
-            result, _ = evaluate(data_loader_test, model, device, task_handler)
-            utils.dump_predictions(args, result, "vqav2_test")
-            exit(0)
-        elif args.task in ["coco_captioning", "nocaps"]:
-            predictions, _ = evaluate(data_loader_test, model, device, task_handler)
-            prediction_file = utils.dump_predictions(args, predictions, "{}_test".format(args.task))
-            if utils.is_main_process() and args.task == "coco_captioning":
-                captioning_result = utils.coco_caption_eval(args.output_dir, prediction_file, "{}_test".format(args.task))
-                result_file = os.path.join(args.output_dir, f"{args.task}_result.json")
-                print(json.dumps(captioning_result))
-                utils.write_result_to_jsonl(captioning_result, result_file)
-            exit(0)
-        elif args.task == "openvivqa":
-            result, _ = evaluate(data_loader_test, model, device, task_handler)
-            utils.dump_predictions(args, result, "openvivqa_test")
-            exit(0)
-        elif args.task == "vivqa":
+
+        if args.task == "vivqa":
             result, _ = evaluate(data_loader_test, model, device, task_handler)
             utils.dump_predictions(args, result, "vivqa_test")
+
+            import torch.distributed as dist
+            if args.distributed:
+                dist.destroy_process_group()
             exit(0)
 
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
 
-    max_accuracy, epochs_without_improvements = utils.get_max_accuracy_and_no_improvement_streak(args.output_dir)
+    max_accuracy, min_val_loss, epochs_without_improvements = utils.get_best_meters_and_no_improvement_streak(args.output_dir, args.early_stopping)
     print(f"This section's initial max_accuracy: {max_accuracy}")
     print(f"This section's initial epochs_without_improvements: {epochs_without_improvements}")
     patience = args.patience
+
+    data_loader_test = create_downstream_dataset(args, is_eval=True, phobert_tokenizer=phobert_tokenizer)
+
     for epoch in range(args.start_epoch, args.epochs):
 
         epoch_start_time = time.time()
@@ -504,6 +661,8 @@ def main(args, ds_init):
                     loss_scaler=loss_scaler, epoch=epoch, model_ema=model_ema)
                 
         if data_loader_val is not None:
+            verify_model_weights(model, epoch_str=str(epoch))     
+
             if args.task not in ["coco_captioning", "nocaps"]:
                 test_stats, task_key = evaluate(data_loader_val, model, device, task_handler)
             else:
@@ -522,10 +681,15 @@ def main(args, ds_init):
             if max_accuracy < test_stats[task_key]:
                 max_accuracy = test_stats[task_key]
                 epochs_without_improvements = 0 # Reset patience
+
+                result, _ = evaluate(data_loader_test, model, device, task_handler)
+                utils.dump_predictions(args, result, "vivqa_test")
+
                 if args.output_dir and args.save_ckpt:
                     utils.save_model(
                         args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
-                        loss_scaler=loss_scaler, epoch="best", model_ema=model_ema)
+                        loss_scaler=loss_scaler, epoch="best", model_ema=model_ema)    
+                
             else:
                 epochs_without_improvements += 1
 
@@ -558,6 +722,7 @@ def main(args, ds_init):
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
+
 
 
 if __name__ == '__main__':
