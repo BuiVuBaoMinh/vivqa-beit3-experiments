@@ -54,6 +54,9 @@ class PaligemmaForVQAClassification(PaliGemmaPreTrainedModel):
         token_type_ids=None,
         paligemma_labels=None, # Pass to Paligemma
         labels=None, # Use for our classification
+        inputs_embeds=None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
         return_dict=True,
     ):
 
@@ -66,6 +69,9 @@ class PaligemmaForVQAClassification(PaliGemmaPreTrainedModel):
             attention_mask=attention_mask,
             token_type_ids=token_type_ids, # Important for masking during training
             labels=paligemma_labels, # Important for causal masking during training
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
             return_dict=True,
             use_phobert_adapter=self.use_phobert_adapter,
             phobert_embedding_adapter=self.phobert_embedding_adapter,
@@ -89,9 +95,9 @@ class PaligemmaForVQAClassification(PaliGemmaPreTrainedModel):
             loss_fct = nn.CrossEntropyLoss()
             loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
 
-        if not return_dict:
-            output = (logits,) + (outputs.hidden_states, outputs.attentions)
-            return ((loss,) + output) if loss is not None else output
+        # if not return_dict:
+        #     output = (logits,) + (outputs.hidden_states, outputs.attentions)
+        #     return ((loss,) + output) if loss is not None else output
 
         return SequenceClassifierOutput(
             loss=loss,
@@ -99,6 +105,26 @@ class PaligemmaForVQAClassification(PaliGemmaPreTrainedModel):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+
+    def get_input_embeddings(self):
+        """
+        Delegates the call to the underlying language model to get the input embeddings.
+        This is required by the PEFT library for gradient checkpointing.
+        """
+        return self.paligemma.language_model.get_input_embeddings()
+
+    def set_input_embeddings(self, new_embeddings):
+        """
+        Delegates the call to the underlying language model to set new input embeddings.
+        """
+        self.paligemma.language_model.set_input_embeddings(new_embeddings)
+
+    def prepare_inputs_for_generation(self, *args, **kwargs):
+        """
+        Delegates the call to the underlying PaliGemma model. This is required
+        by PEFT for generation tasks.
+        """
+        return self.paligemma.prepare_inputs_for_generation(*args, **kwargs)
     
     def _load_answer_mappings(self, file_path):
         """
@@ -150,7 +176,6 @@ class PaligemmaForVQAClassification(PaliGemmaPreTrainedModel):
         vision and language model backbones.
         """
         num_text_layers = len(self.paligemma.language_model.layers)
-        # Vision tower layers are typically in an 'encoder.layer' attribute
         num_vision_layers = len(self.paligemma.vision_tower.vision_model.encoder.layers)
         print(type(self.paligemma.vision_tower))
         print(f"Num layers: {num_text_layers + num_vision_layers}")
@@ -161,141 +186,51 @@ class PaligemmaForVQAClassification(PaliGemmaPreTrainedModel):
         return {'position_embedding', 'class_embedding', 'logit_scale'}
 
 def get_vivqa_paligemma(
-        paligemma_model_id = PALIGEMMA_MODEL_ID,
+        paligemma_model_id=PALIGEMMA_MODEL_ID,
         paligemma_config: PaliGemmaConfig = None,
-        num_labels = 336, # 335 labels plus an UNKNOWN
-        answer2label_path = None,
-        device = "cuda"
+        num_labels=336,
+        answer2label_path=None,
+        device="cuda",
+        **kwargs # This will receive the quantization_config
 ) -> PaligemmaForVQAClassification:
     
     if paligemma_config is None:
         paligemma_config = PaliGemmaConfig.from_pretrained(paligemma_model_id)
 
-    # --- INSTANTIATE AND MANUALLY LOAD WEIGHTS ---
-
-    # 1. Instantiate our randomly initialized custom model
-    print(f"Instantiating custom PaligemmaForVQAClassification model with {num_labels} labels...")
+    # 1. Instantiate your custom model wrapper. 
+    # At this point, its `self.paligemma` attribute is the default, un-trained version.
+    print(f"Instantiating custom PaligemmaForVQAClassification shell with {num_labels} labels...")
     model = PaligemmaForVQAClassification(config=paligemma_config, num_labels=num_labels, answer2label_path=answer2label_path)
 
-    # 2. Load the full pre-trained VQA model into a temporary variable
-    print("Loading full pre-trained PaliGemmaModel model temporarily...")
-    temp_vqa_model = PaliGemmaModel.from_pretrained(paligemma_model_id, cache_dir=MY_CACHE_DIR, local_files_only=True).to(device)
+    # 2. Load the full pre-trained PaliGemmaModel directly from Hugging Face with quantization.
+    # This is the powerful base model we want to use.
+    print("Loading full pre-trained and quantized PaliGemmaModel...")
+    base_paligemma_model = PaliGemmaModel.from_pretrained(
+        paligemma_model_id,
+        cache_dir=MY_CACHE_DIR,
+        local_files_only=True,
+        **kwargs  # The quantization_config gets passed here
+    )
 
     # 3. Manually copy the weights from the temporary model to our custom model
     print("Manually copying pre-trained weights...")
-    model.paligemma.vision_tower.load_state_dict(temp_vqa_model.vision_tower.state_dict())
-    model.paligemma.language_model.load_state_dict(temp_vqa_model.language_model.state_dict(), strict=False)
+    model.paligemma.vision_tower.load_state_dict(base_paligemma_model.vision_tower.state_dict(), strict=False)
+    model.paligemma.language_model.load_state_dict(base_paligemma_model.language_model.state_dict(), strict=False)
     print("✅ Pre-trained weights for vision and text models loaded successfully.")
 
-    print(f"paligemma.pad_token_id: {model.paligemma.pad_token_id}, paligemma.language_model.padding_idx: {model.paligemma.language_model.padding_idx}")
-
     # Clean up the temporary model to save memory
-    del temp_vqa_model
+    del base_paligemma_model
     torch.cuda.empty_cache()
 
     return model
-
-def get_vivqa_paligemma_phobert(
-    paligemma_model_id = PALIGEMMA_MODEL_ID,
-    phobert_id = PHOBERT_MODEL_ID,
-    num_labels = 336, # 335 labels plus an UNKNOWN
-    answer2label_path = None,
-    device = "cuda"
-):
-
-    # --- LOAD MODELS AND TOKENIZER ---
-    print("Loading PhoBERT and Paligemma configurations...")
-    phobert_model = RobertaModel.from_pretrained(phobert_id)
-    phobert_tokenizer = PhobertTokenizer.from_pretrained(phobert_id)
-
-    if not hasattr(phobert_tokenizer, "image_token"):
-        image_token = AddedToken(IMAGE_TOKEN, normalized=False, special=True)
-        tokens_to_add = {"additional_special_tokens": [image_token]}
-        phobert_tokenizer.add_special_tokens(tokens_to_add)
-        image_token_id = phobert_tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
-        image_token = IMAGE_TOKEN
-
-        phobert_tokenizer.add_tokens(EXTRA_TOKENS)
-        phobert_tokenizer.add_bos_token = False
-        phobert_tokenizer.add_eos_token = False
-
-        print(f"Added '<image>' token to PhobertTokenizer with new ID: {image_token_id}")
-
-    custom_paligemma_config = PaliGemmaConfig.from_pretrained(paligemma_model_id)
-    custom_paligemma_config.pad_token_id = phobert_model.config.pad_token_id
-    custom_paligemma_config.text_config.pad_token_id = phobert_model.config.pad_token_id
-    custom_paligemma_config.image_token_id = image_token_id
-    
-    paligemma_model = get_vivqa_paligemma(
-        paligemma_model_id=paligemma_model_id, 
-        paligemma_config = custom_paligemma_config,
-        num_labels=num_labels, 
-        answer2label_path=answer2label_path, 
-        device=device
-    )
-    
-    # --- PERFORM WEIGHT TRANSPLANT ---
-    print("\nPerforming weight transplant for the Paligemma language model...")
-
-    # 1. Resize the text model's embeddings
-    new_vocab_size = len(phobert_tokenizer)
-
-    paligemma_model.paligemma.resize_token_embeddings(new_vocab_size)
-    print(f"Resized text model embeddings to: {paligemma_model.paligemma.get_input_embeddings().weight.data.shape}")
-
-    # 2. Copy the weights from PhoBERT
-    # --- PERFORM PARTIAL WEIGHT TRANSPLANT ---
-    print("\nPerforming partial weight transplant from PhoBERT to PaliGemma...")
-    with torch.no_grad():
-        source_embeddings = phobert_model.embeddings.word_embeddings
-        target_embeddings = paligemma_model.paligemma.language_model.embed_tokens
-
-        source_vocab_size, source_dim = source_embeddings.weight.shape
-        target_vocab_size, target_dim = target_embeddings.weight.shape
-        
-        # Determine the number of tokens to copy (the original PhoBERT vocab size)
-        num_tokens_to_copy = source_vocab_size
-        
-        # Copy the 768-dim PhoBERT weights into the first 768 dims of the 2304-dim PaliGemma weights
-        paligemma_model.paligemma.language_model.embed_tokens.weight.data[0:num_tokens_to_copy, 0:source_dim] = \
-            phobert_model.embeddings.word_embeddings.weight.data[0:num_tokens_to_copy, :].clone()
-        print(f"Copied weights for {num_tokens_to_copy} tokens from PhoBERT (dim {source_dim}) into PaliGemma (dim {target_dim}).")
-
-    # --- Update Special Token IDs in Model Config ---
-    print("\nUpdating model configuration with new special token IDs...")
-    paligemma_model.paligemma.language_model.config.bos_token_id = phobert_tokenizer.bos_token_id
-    paligemma_model.paligemma.language_model.config.eos_token_id = phobert_tokenizer.eos_token_id
-    paligemma_model.paligemma.language_model.config.pad_token_id = phobert_tokenizer.pad_token_id
-
-    print(f"phobert_tokenizer.pad_token_id: {phobert_tokenizer.pad_token_id}, phobert's pad_token_id: {phobert_model.config.pad_token_id}")
-
-    # --- VERIFICATION ---
-    print("\nVerifying transplant...")
-    with torch.no_grad():
-        # Get the target slice from PaliGemma that was just modified
-        target_slice = paligemma_model.paligemma.language_model.embed_tokens.weight[0:num_tokens_to_copy, 0:source_dim]
-        
-        # Get the source slice from the original PhoBERT model
-        source_slice = phobert_model.embeddings.word_embeddings.weight[0:num_tokens_to_copy, :]
-
-        # In the assertion, we cast the source_slice to the same dtype as the target_slice
-        # This compares bfloat16 to bfloat16, which will pass.
-        assert torch.equal(target_slice, source_slice.to(target_slice.dtype))
-
-    assert paligemma_model.paligemma.pad_token_id == phobert_model.config.pad_token_id, \
-        f"pad_token_id mismatch! paligemma: {paligemma_model.paligemma.pad_token_id}, phobert: {phobert_model.config.pad_token_id}"
-    assert paligemma_model.paligemma.language_model.padding_idx == phobert_model.config.pad_token_id, \
-        f"pad_token_id mismatch! paligemma: {paligemma_model.paligemma.language_model.padding_idx}, phobert: {phobert_model.config.pad_token_id}"
-    print("✅ PhoBERT embedding transplant successful and verified!")
-
-    return paligemma_model
 
 def get_vivqa_paligemma_phobert_with_adapter(
     paligemma_model_id=PALIGEMMA_MODEL_ID,
     phobert_id=PHOBERT_MODEL_ID,
     num_labels=336,
     answer2label_path=None,
-    device="cuda"
+    device="cuda",
+    **kwargs
 ):
     print("Loading PhoBERT model and tokenizer...")
     phobert_model = RobertaModel.from_pretrained(phobert_id, cache_dir=MY_CACHE_DIR)
@@ -334,7 +269,8 @@ def get_vivqa_paligemma_phobert_with_adapter(
         paligemma_model_id=paligemma_model_id,
         num_labels=num_labels,
         answer2label_path=answer2label_path,
-        device=device
+        device=device,
+        **kwargs
     )
 
     # Initialize the adapter
@@ -376,6 +312,7 @@ def get_vivqa_paligemma_phobert_with_adapter(
     paligemma_model.config.text_config.pad_token_id = phobert_tokenizer.pad_token_id
     paligemma_model.config.image_token_index = image_token_id # Note: Paligemma uses image_token_index
     paligemma_model.config.image_token_id = image_token_id
+    paligemma_model.config._vocab_size = new_vocab_size
 
     print("✅ PhoBERT embedding transplant with adapter successful!")
     
@@ -555,8 +492,8 @@ class MyPaliGemma(PaliGemmaModel):
         "Where is the cat standing?\nsnow"
         ```"""
 
-        if (input_ids is None) ^ (inputs_embeds is not None):
-            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+        # if (input_ids is None) ^ (inputs_embeds is not None):
+        #     raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -596,13 +533,16 @@ class MyPaliGemma(PaliGemmaModel):
         if pixel_values is not None:
             image_features = self.get_image_features(pixel_values)
 
-            if input_ids is None:
-                special_image_mask = inputs_embeds == self.get_input_embeddings()(
-                    torch.tensor(self.config.image_token_id, dtype=torch.long, device=inputs_embeds.device)
-                )
-            else:
-                special_image_mask = (input_ids == self.config.image_token_id).unsqueeze(-1)
-                special_image_mask = special_image_mask.expand_as(inputs_embeds).to(inputs_embeds.device)
+            # if input_ids is None:
+            #     special_image_mask = inputs_embeds == self.get_input_embeddings()(
+            #         torch.tensor(self.config.image_token_id, dtype=torch.long, device=inputs_embeds.device)
+            #     )
+            # else:
+            #     special_image_mask = (input_ids == self.config.image_token_id).unsqueeze(-1)
+            #     special_image_mask = special_image_mask.expand_as(inputs_embeds).to(inputs_embeds.device)
+
+            special_image_mask = (input_ids == self.config.image_token_id).unsqueeze(-1)
+            special_image_mask = special_image_mask.expand_as(inputs_embeds).to(inputs_embeds.device)
 
             if not is_torchdynamo_compiling() and inputs_embeds[special_image_mask].numel() != image_features.numel():
                 image_tokens_in_text = (special_image_mask).sum(dim=1).sum(dim=0)[0]

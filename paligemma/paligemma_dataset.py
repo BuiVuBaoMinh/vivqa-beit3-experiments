@@ -16,7 +16,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import utils
 from glossary import segment_normalize
-from GemmaFitPhobertTokenizer import GemmaFitPhobertTokenizer
+from GemmaFitPhobertTokenizer import GemmaFitPhobertTokenizer, CustomPaliGemmaProcessor
 
 
 def remove_under_score(text: str):
@@ -33,7 +33,7 @@ class ViVQAPaligemmaDataset(torch.utils.data.Dataset):
                  args,
                  json_path, image_dir, split,
                  paligemma_model_id="google/paligemma2-3b-pt-224",
-                 phobert_tokenizer: GemmaFitPhobertTokenizer = None):
+                 phobert_tokenizer: PhobertTokenizer = None):
         
         with open(json_path, "r", encoding="utf-8") as f:
             self.data = json.load(f)
@@ -79,7 +79,7 @@ class ViVQAPaligemmaDataset(torch.utils.data.Dataset):
         # self.max_length = 258 # PhoBERT's positional embeds 258 positions maximum
 
         self.dummy_suffix = None
-        self.dummy_suffix = self.processor.tokenizer.decode(self.processor.tokenizer.pad_token_id)
+        self.dummy_suffix = self.processor.tokenizer.pad_token
         print(f"Paligemma Processor's dummy suffix: {self.dummy_suffix}")
     
     def __len__(self):

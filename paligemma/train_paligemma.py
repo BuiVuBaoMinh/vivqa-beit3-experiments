@@ -13,12 +13,13 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 import torch
 from torch.optim import AdamW
-from transformers import PhobertTokenizer
+from transformers import PhobertTokenizer, BitsAndBytesConfig 
 import bitsandbytes as bnb
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from paligemma import get_vivqa_paligemma, get_vivqa_paligemma_phobert, get_vivqa_paligemma_phobert_with_adapter, get_vivqa_paligemma_phobert_with_adapter_dev, PaligemmaForVQAClassification
+from paligemma import get_vivqa_paligemma, get_vivqa_paligemma_phobert_with_adapter, get_vivqa_paligemma_phobert_with_adapter_dev, PaligemmaForVQAClassification
 from paligemma_dataset import create_paligemma_datasets
 from my_utils import TrainingF1Score, my_dump_predictions, my_save_model, my_auto_resume
 from paligemma_engine_for_finetuning import PaligemmaHandler, paligemma_evaluate
@@ -126,41 +127,54 @@ def get_args():
     return parser.parse_args()
 
 # <<< START HELPER FUNCTIONS FOR STAGED TRAINING >>>
-def log_model_architecture(model, output_dir, stage_config):
+def log_model_architecture(model, output_dir, suffix):
     """Saves a file detailing which parameters are trainable/frozen for a given stage."""
-    filepath = os.path.join(output_dir, f"Model_Architecture_{stage_config['name']}.txt")
-    print(f"Logging model architecture for stage '{stage_config['name']}' to {filepath}")
+    filepath = os.path.join(output_dir, f"Model_Architecture_{suffix}.txt")
 
     with open(filepath, "w") as f:
-        f.write(f"--- Model Architecture for Stage: {stage_config['name']} ---\n\n")
+        f.write(f"--- Model Architecture {suffix}: ---\n\n")
         
         trainable_params = []
         frozen_params = []
+
+        total_trainable = 0
+        total_frozen = 0
         
         for name, param in model.named_parameters():
+            num_params = param.numel()
+            # Format: Parameter Name | Dimensions | Total Elements
+            param_info = f"{name:<120} | shape: {str(param.shape):<25} | params: {num_params}"
+            
             if param.requires_grad:
-                trainable_params.append(name)
+                trainable_params.append(f"Trainable: {param_info}")
+                total_trainable += num_params
             else:
-                frozen_params.append(name)
+                frozen_params.append(f"Frozen:    {param_info}")
+                total_frozen += num_params
 
         f.write("--- Trainable Parameters ---\n")
-        for name in trainable_params:
-            f.write(f"Trainable: {name}\n")
+        for line in trainable_params:
+            f.write(f"{line}\n")
             
         f.write("\n--- Frozen Parameters ---\n")
-        for name in frozen_params:
-            f.write(f"Frozen: {name}\n")
+        for line in frozen_params:
+            f.write(f"{line}\n")
             
         f.write("\n--- Summary ---\n")
-        total_params = len(trainable_params) + len(frozen_params)
-        f.write(f"Total Parameter Blocks: {total_params}\n")
+        total_params = total_trainable + total_frozen
+        f.write(f"Total Parameter Blocks: {len(trainable_params) + len(frozen_params)}\n")
         f.write(f"Trainable Parameter Blocks: {len(trainable_params)}\n")
-        f.write(f"Frozen Parameter Blocks: {len(frozen_params)}\n")
+        f.write(f"Frozen Parameter Blocks: {len(frozen_params)}\n\n")
 
-        f.write(f"Total params: {sum(p.numel() for p in model.parameters())}\n")
-        f.write(f"Frozen params: {sum(p.numel() for p in model.parameters() if not p.requires_grad)}\n")
-        f.write(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}\n")
+        f.write(f"Total params:     {total_params:,}\n")
+        f.write(f"Trainable params: {total_trainable:,} ({100 * total_trainable / total_params:.4f}%)\n")
+        f.write(f"Frozen params:    {total_frozen:,}\n")
 
+
+
+def log_training_config(output_dir, stage_config):
+    filepath = os.path.join(output_dir, f"Stage_Config:{stage_config['name']}.txt")
+    with open(filepath, "w") as f:
         f.write("\n--- Stage Config ---\n")
         json.dump(stage_config, f, ensure_ascii=False, indent=4)
 
@@ -174,15 +188,24 @@ def get_resume_stage_index(global_epoch, stages):
         
 def log_paligemma_model_config(model: PaligemmaForVQAClassification, output_dir):
     outfile = os.path.join(output_dir, f"model_config.txt")
+
+     # --- Define a custom JSON encoder to handle torch.dtype ---
+    class DtypeJSONEncoder(json.JSONEncoder):
+        def default(self, obj):
+            if isinstance(obj, torch.dtype):
+                return str(obj)  # Convert dtype to its string representation
+            return super().default(obj)
+        
     with open(outfile, "w") as f:
-        f.write(f"--- Paligemma Language Model Config ---")
-        json.dump(model.paligemma.language_model.config.to_dict(), f,  indent = 4)
+        f.write(f"--- Paligemma Language Model Config ---\n")
+        # --- Use the custom encoder in the json.dump call ---
+        json.dump(model.paligemma.language_model.config.to_dict(), f, indent=4, cls=DtypeJSONEncoder)
         
         f.write("\n\n--- Paligemma Vision Tower Config ---\n\n")
-        json.dump(model.paligemma.vision_tower.config.to_dict(), f, indent = 4)
+        json.dump(model.paligemma.vision_tower.config.to_dict(), f, indent=4, cls=DtypeJSONEncoder)
 
         f.write("\n\n--- Paligemma Model Config ---\n\n")
-        json.dump(model.paligemma.config.to_dict(), f, indent = 4)
+        json.dump(model.paligemma.config.to_dict(), f, indent=4, cls=DtypeJSONEncoder)
 
         f.write("\n\n--- Classifier head Dropout ---\n\n")
         f.write(f"nn.DropOut: {model.dropout.p}")
@@ -199,7 +222,8 @@ def setup_model_for_stage(model: PaligemmaForVQAClassification, stage_config):
     # This logic assumes a "start trainable and freeze some" approach
     # which is simpler. First, set everything to trainable.
     for param in model.parameters():
-        param.requires_grad = True
+        if param.dtype in [torch.float, torch.float16, torch.bfloat16]:
+            param.requires_grad = True
 
     if stage_config.get('freeze_paligemma_vision_tower', True):
         print("Paligemma's vision tower is FROZEN.")
@@ -504,6 +528,7 @@ def main(args):
     if args.phobert:
         phobert_tokenizer = GemmaFitPhobertTokenizer.from_pretrained("vinai/phobert-base-v2", use_fast=True)
 
+
     if args.phobert:
         # model = get_vivqa_paligemma_phobert(device=device, answer2label_path=args.answer2label).to(device, non_blocking=True, dtype=dtype)
         # model = get_vivqa_paligemma_phobert_with_adapter_dev(
@@ -515,7 +540,44 @@ def main(args):
     else:
         model = get_vivqa_paligemma(device = device, answer2label_path=args.answer2label).to(device, non_blocking=True, dtype=dtype)
 
+    log_model_architecture(model, args.output_dir, "BASE_PALIGEMMA")
+
     model.gradient_checkpointing_enable()
+    model = prepare_model_for_kbit_training(model)
+
+    # --- Define the LoRA Configuration ---
+    # Target modules for both vision and language models
+    # These are common linear layers in transformer architectures
+    lora_target_modules = [
+        # Language Model Projections
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj",
+        
+        # Vision Tower Projections
+        "vision_tower.vision_model.encoder.layers.*.self_attn.q_proj",
+        "vision_tower.vision_model.encoder.layers.*.self_attn.k_proj",
+        "vision_tower.vision_model.encoder.layers.*.self_attn.v_proj",
+        "vision_tower.vision_model.encoder.layers.*.self_attn.o_proj",
+        "vision_tower.vision_model.encoder.layers.*.mlp.gate_proj",
+        "vision_tower.vision_model.encoder.layers.*.mlp.up_proj",
+        "vision_tower.vision_model.encoder.layers.*.mlp.down_proj",
+    ]
+
+    config = LoraConfig(
+        r=16,  # Rank of the update matrices. Higher rank means more parameters.
+        lora_alpha=32,  # A scaling factor. A good rule of thumb is to set it to 2 * r.
+        target_modules=lora_target_modules,
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM",
+        modules_to_save=['phobert_embedding_adapter', 'classifier']
+    )
+
+    # Wrap the model with PEFT
+    model = get_peft_model(model, config)
+
+    # Print the trainable parameters to verify
+    model.print_trainable_parameters()
 
     dataset_train, data_loader_train, dataset_val, data_loader_val = create_paligemma_datasets(
         args,
@@ -593,7 +655,7 @@ def main(args):
             stage_config['name'] = f"Stage_{i+1}_{stage_config['name']}" # Add number to name
             setup_model_for_stage(model, stage_config)
             
-            log_model_architecture(model, args.output_dir, stage_config)
+            # log_model_architecture(model, args.output_dir, stage_config)
             
             if args.resume != '':
                 optimizer = old_optimizer
@@ -633,7 +695,7 @@ def main(args):
         stage_config = {
                 'name': 'Standard End-to-End Training',
                 'epochs': args.epochs,
-                'freeze_paligemma_vision_tower': True,  # args.phobert,
+                'freeze_paligemma_vision_tower': False,  # args.phobert,
                 'freeze_paligemma_language_model': False,
                 'freeze_embed_tokens': args.freeze_embed_tokens,
                 'freeze_classifier': False,
@@ -648,11 +710,12 @@ def main(args):
             }
 
         optimizer = create_stage_optimizer(model, stage_config, args)
-        setup_model_for_stage(model, stage_config)
+        # setup_model_for_stage(model, stage_config)
         if args.resume != '':
             model, optimizer, args.start_epoch = my_auto_resume(args, model=model, optimizer=optimizer, device=device)
 
-        log_model_architecture(model, args.output_dir, stage_config) # Log architecture for standard training too
+        log_model_architecture(model, args.output_dir, "PALIGEMMA_LORA") # Log architecture for standard training too
+        log_training_config(args.output_dir, stage_config)
 
         metric_trackers = {
             'max_accuracy': 0.0,
