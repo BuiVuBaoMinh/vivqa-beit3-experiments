@@ -13,18 +13,18 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 import torch
 from torch.optim import AdamW
-from transformers import PhobertTokenizer, BitsAndBytesConfig 
+from transformers import PhobertTokenizer, BitsAndBytesConfig, TorchAoConfig
 import bitsandbytes as bnb
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from paligemma import get_vivqa_paligemma, get_vivqa_paligemma_phobert_with_adapter, get_vivqa_paligemma_phobert_with_adapter_dev, PaligemmaForVQAClassification
-from paligemma_dataset import create_paligemma_datasets
+from qwen2_5_vl import get_vivqa_qwen_2_5_vl, get_vivqa_qwen_2_5_vl_phobert_with_adapter, Qwen_2_5_VL_ForVQAClassification
+from qwen2_5_vl_dataset import create_qwen2_5_vl_datasets
 from my_utils import TrainingF1Score, my_dump_predictions, my_save_model, my_auto_resume
-from paligemma_engine_for_finetuning import PaligemmaHandler, paligemma_evaluate
+from qwen2_5_vl_engine_for_finetuning import Qwen2_5_VLHandler, qwen2_5_vl_evaluate
 
-from GemmaFitPhobertTokenizer import GemmaFitPhobertTokenizer
+from Qwen25VLFitPhobertTokenizer import Qwen2_5_VLFitPhobertTokenizer
 
 import utils
 from optim_factory import create_optimizer, LayerDecayValueAssigner, get_is_head_flag_for_vit
@@ -186,7 +186,7 @@ def get_resume_stage_index(global_epoch, stages):
         if cnt > global_epoch:
             return i  
         
-def log_paligemma_model_config(model: PaligemmaForVQAClassification, output_dir):
+def log_qwen2_5_vl_model_config(model: Qwen_2_5_VL_ForVQAClassification, output_dir):
     outfile = os.path.join(output_dir, f"model_config.txt")
 
      # --- Define a custom JSON encoder to handle torch.dtype ---
@@ -197,15 +197,15 @@ def log_paligemma_model_config(model: PaligemmaForVQAClassification, output_dir)
             return super().default(obj)
         
     with open(outfile, "w") as f:
-        f.write(f"--- Paligemma Language Model Config ---\n")
+        f.write(f"--- Qwen 2.5 VL Language Model Config ---\n")
         # --- Use the custom encoder in the json.dump call ---
-        json.dump(model.paligemma.language_model.config.to_dict(), f, indent=4, cls=DtypeJSONEncoder)
+        json.dump(model.qwen_2_5_vl.language_model.config.to_dict(), f, indent=4, cls=DtypeJSONEncoder)
         
-        f.write("\n\n--- Paligemma Vision Tower Config ---\n\n")
-        json.dump(model.paligemma.vision_tower.config.to_dict(), f, indent=4, cls=DtypeJSONEncoder)
+        f.write("\n\n--- Qwen 2.5 VL Visual Config ---\n\n")
+        json.dump(model.qwen_2_5_vl.visual.config.to_dict(), f, indent=4, cls=DtypeJSONEncoder)
 
-        f.write("\n\n--- Paligemma Model Config ---\n\n")
-        json.dump(model.paligemma.config.to_dict(), f, indent=4, cls=DtypeJSONEncoder)
+        f.write("\n\n--- Qwen 2.5 VL Model Config ---\n\n")
+        json.dump(model.qwen_2_5_vl.config.to_dict(), f, indent=4, cls=DtypeJSONEncoder)
 
         f.write("\n\n--- Classifier head Dropout ---\n\n")
         f.write(f"nn.DropOut: {model.dropout.p}")
@@ -215,8 +215,7 @@ def log_paligemma_model_config(model: PaligemmaForVQAClassification, output_dir)
             for name, params in model.phobert_embedding_adapter.named_parameters():
                 f.write(f"{name}: {params.shape}\n")
 
-def setup_model_for_stage(model: PaligemmaForVQAClassification, stage_config):
-    """Freezes/unfreezes BLIP model parameters based on the stage configuration."""
+def setup_model_for_stage(model: Qwen_2_5_VL_ForVQAClassification, stage_config):
     print(f"--- Configuring model for stage: {stage_config['name']} ---")
 
     # This logic assumes a "start trainable and freeze some" approach
@@ -225,20 +224,20 @@ def setup_model_for_stage(model: PaligemmaForVQAClassification, stage_config):
         if param.dtype in [torch.float, torch.float16, torch.bfloat16]:
             param.requires_grad = True
 
-    if stage_config.get('freeze_paligemma_vision_tower', True):
-        print("Paligemma's vision tower is FROZEN.")
-        for param in model.paligemma.vision_tower.parameters():
+    if stage_config.get('freeze_qwen2_5_vl_visual', True):
+        print("Qwen 2.5 VL's visual is FROZEN.")
+        for param in model.qwen_2_5_vl.visual.parameters():
             param.requires_grad = False
 
-    if stage_config.get('freeze_paligemma_language_model', True):
-        print("Paligemma's language model (excluding embed-tokens) is FROZEN.")
-        for name, param in model.paligemma.language_model.named_parameters():
+    if stage_config.get('freeze_qwen2_5_vl_language_model', True):
+        print("Qwen 2.5 VL's language model (excluding embed-tokens) is FROZEN.")
+        for name, param in model.qwen_2_5_vl.language_model.named_parameters():
             if 'embed-tokens' not in name:
                 param.requires_grad = False
 
     if stage_config.get('freeze_embed_tokens', True):
-        print("PhoBERT transplanted word embeddings (paligemma's embed_tokens) are FROZEN.")
-        for name, param in model.paligemma.language_model.embed_tokens.named_parameters():
+        print("PhoBERT transplanted word embeddings (Qwen 2.5 VL's embed_tokens) are FROZEN.")
+        for name, param in model.qwen_2_5_vl.language_model.embed_tokens.named_parameters():
             if "word_embeddings" not in name:
                 param.requires_grad = False
 
@@ -252,9 +251,9 @@ def setup_model_for_stage(model: PaligemmaForVQAClassification, stage_config):
         for param in model.phobert_embedding_adapter.parameters():
             param.requires_grad = True
 
-def create_stage_optimizer(model: PaligemmaForVQAClassification, stage_config, args):
+def create_stage_optimizer(model: Qwen_2_5_VL_ForVQAClassification, stage_config, args):
     """
-    Creates a staged optimizer for the Paligemma model, correctly handling both
+    Creates a staged optimizer for the Qwen 2.5 VL model, correctly handling both
     differential learning rates and selective weight decay.
     """
     print(f"--- Creating optimizer for stage: {stage_config['name']} ---")
@@ -268,8 +267,8 @@ def create_stage_optimizer(model: PaligemmaForVQAClassification, stage_config, a
     # Define the components of your model and their learning rates
     lrs = stage_config['lrs']
     components = {
-        'paligemma_vision_tower': {'params': [], 'lr': lrs['paligemma_vision_tower']},
-        'paligemma_language_model': {'params': [], 'lr': lrs['paligemma_language_model']},
+        'qwen2_5_vl_visual': {'params': [], 'lr': lrs['qwen2_5_vl_visual']},
+        'qwen2_5_vl_language_model': {'params': [], 'lr': lrs['qwen2_5_vl_language_model']},
         'embed_tokens': {'params': [], 'lr': lrs['embed_tokens']},
         'classifier': {'params': [], 'lr': lrs['classifier']},
     }
@@ -285,12 +284,12 @@ def create_stage_optimizer(model: PaligemmaForVQAClassification, stage_config, a
         if not param.requires_grad:
             continue
         
-        if 'vision_tower' in name:
-            components['paligemma_vision_tower']['params'].append((name, param))
+        if 'visual' in name:
+            components['qwen2_5_vl_visual']['params'].append((name, param))
         elif 'embed_tokens' in name:
             components['embed_tokens']['params'].append((name, param))
         elif 'language_model' in name:
-            components['paligemma_language_model']['params'].append((name, param))
+            components['qwen2_5_vl_language_model']['params'].append((name, param))
         elif 'classifier' in name:
             components['classifier']['params'].append((name, param))
         elif 'phobert_embedding_adapter' in name:
@@ -340,7 +339,7 @@ def create_stage_optimizer(model: PaligemmaForVQAClassification, stage_config, a
 def train_stage(stage_config, global_epoch_start, model,
                 data_loader_train, dataset_train, 
                 data_loader_val, dataset_val,
-                optimizer, device, task_handler: PaligemmaForVQAClassification, args,
+                optimizer, device, task_handler: Qwen_2_5_VL_ForVQAClassification, args,
                 # Pass metric trackers by reference (as a dict) to modify them
                 metric_trackers,
                 stage_index):
@@ -383,8 +382,7 @@ def train_stage(stage_config, global_epoch_start, model,
             pixel_values = batch["pixel_values"].to(device)
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
-            token_type_ids = batch["token_type_ids"].to(device)
-            paligemma_labels = batch["paligemma_labels"].to(device)
+            image_grid_thw = batch["image_grid_thw"].to(device)
             labels = batch["labels"].to(device)
             qid = batch["qid"]
 
@@ -405,8 +403,7 @@ def train_stage(stage_config, global_epoch_start, model,
                 input_ids = input_ids,
                 pixel_values = pixel_values,
                 attention_mask = attention_mask,
-                token_type_ids = token_type_ids,
-                paligemma_labels = paligemma_labels, # Pass to Paligemma
+                image_grid_thw = image_grid_thw,
                 labels = labels, # Use for our classification
                 qid=None
             )
@@ -447,7 +444,7 @@ def train_stage(stage_config, global_epoch_start, model,
                 my_save_model(args=args, epoch=epoch, model=model, optimizer=optimizer)
                 
         if data_loader_val is not None:
-            val_stats = paligemma_evaluate(
+            val_stats = qwen2_5_vl_evaluate(
                 data_loader_val, model, dataset_val.processor.tokenizer, device, task_handler, return_preds=False
             )
             print(f"Performance of the network on the {len(data_loader_val)} val batches: {val_stats['score']:.1f}%")
@@ -526,44 +523,47 @@ def main(args):
     phobert_tokenizer = None
 
     if args.phobert:
-        phobert_tokenizer = GemmaFitPhobertTokenizer.from_pretrained("vinai/phobert-base-v2", use_fast=True)
+        phobert_tokenizer = Qwen2_5_VLFitPhobertTokenizer.from_pretrained("vinai/phobert-base-v2", use_fast=True)
 
+    print("Defining 4-bit bitsandbytes quantization config...")
+    quantization_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+    )
 
     if args.phobert:
         # model = get_vivqa_paligemma_phobert(device=device, answer2label_path=args.answer2label).to(device, non_blocking=True, dtype=dtype)
         # model = get_vivqa_paligemma_phobert_with_adapter_dev(
         #     device=device, answer2label_path=args.answer2label
         # ).to(device, non_blocking=True, dtype=dtype)
-        model = get_vivqa_paligemma_phobert_with_adapter(
-            device=device, answer2label_path=args.answer2label
+        model = get_vivqa_qwen_2_5_vl_phobert_with_adapter(
+            device=device,
+            answer2label_path=args.answer2label
         ).to(device, non_blocking=True, dtype=dtype)
     else:
-        model = get_vivqa_paligemma(device = device, answer2label_path=args.answer2label).to(device, non_blocking=True, dtype=dtype)
+        model = get_vivqa_qwen_2_5_vl(
+            device = device, 
+            answer2label_path=args.answer2label,
+            quantization_config=quantization_config,
+        ).to(device, non_blocking=True, dtype=dtype)
 
-    log_model_architecture(model, args.output_dir, "BASE_PALIGEMMA")
+    log_model_architecture(model, args.output_dir, "BASE_QWEN2_5_VL")
 
     model.gradient_checkpointing_enable()
     model = prepare_model_for_kbit_training(model)
 
-    # --- ADD THIS DEBUGGING CODE ---
+    # # --- ADD THIS DEBUGGING CODE ---
     # print("--- Finding available module names for LoRA ---")
     # for name, module in model.named_modules():
     #     if isinstance(module, torch.nn.Linear): # Optional: Filter for Linear layers
     #         print(name)
     # print("---------------------------------------------")
 
-    # sys.exit(0)
-
     # --- Define the LoRA Configuration ---
-    # Target modules for both vision and language models
-    # These are common linear layers in transformer architectures
     lora_target_modules = (
-        r"paligemma\.language_model\.layers\.\d+\."
-        r"(self_attn\.(q_proj|k_proj|v_proj|o_proj)|mlp\.(gate_proj|up_proj|down_proj))"
+        r"(qwen_2_5_vl\.language_model\.layers\.\d+\.)|(qwen_2_5_vl\.visual\.blocks\.\d+\.)"
+        r"(self_attn\.(q_proj|k_proj|v_proj|o_proj)|mlp\.(gate_proj|up_proj|down_proj))|(attn\.qkv)"
     )
-
-
-    # lora_target_modules = ["q_proj", "v_proj"]
 
     config = LoraConfig(
         r=16,  # LoRA rank
@@ -578,10 +578,7 @@ def main(args):
     # Wrap the model with PEFT
     model = get_peft_model(model, config)
 
-    # Print the trainable parameters to verify
-    # model.print_trainable_parameters()
-
-    dataset_train, data_loader_train, dataset_val, data_loader_val = create_paligemma_datasets(
+    dataset_train, data_loader_train, dataset_val, data_loader_val = create_qwen2_5_vl_datasets(
         args,
         phobert_tokenizer=phobert_tokenizer
     )
@@ -590,16 +587,16 @@ def main(args):
 
     print('Number of params:', n_parameters)
 
-    task_handler = PaligemmaHandler()
+    task_handler = Qwen2_5_VLHandler()
 
     if args.eval:
         my_auto_resume(args, model=model, optimizer=None, device=device) # Load best checkpoint for eval
-        dataset_test, data_loader_test = create_paligemma_datasets(
+        dataset_test, data_loader_test = create_qwen2_5_vl_datasets(
             args,
             is_eval = True,
             phobert_tokenizer = phobert_tokenizer 
         )
-        result = paligemma_evaluate(
+        result = qwen2_5_vl_evaluate(
             data_loader=data_loader_test,
             model=model,
             tokenizer=dataset_test.processor.tokenizer,
@@ -607,12 +604,12 @@ def main(args):
             handler=task_handler,
             return_preds=True
         )
-        my_dump_predictions(args, result["prediction"], "vivqa_paligemma_test")
+        my_dump_predictions(args, result["prediction"], "vivqa_qwen2_5_vl_test")
         exit(0)
 
     start_time = time.time()
 
-    log_paligemma_model_config(model, args.output_dir)
+    log_qwen2_5_vl_model_config(model, args.output_dir)
 
     if args.staged_training and args.phobert:
         
@@ -697,26 +694,26 @@ def main(args):
         stage_config = {
                 'name': 'Standard End-to-End Training',
                 'epochs': args.epochs,
-                'freeze_paligemma_vision_tower': False,  # args.phobert,
-                'freeze_paligemma_language_model': False,
+                'freeze_qwen2_5_vl_visual': False,  # args.phobert,
+                'freeze_qwen2_5_vl_language_model': False,
                 'freeze_embed_tokens': args.freeze_embed_tokens,
                 'freeze_classifier': False,
                 'freeze_phobert_adapter': False,
                 'lrs': {
-                    'paligemma_vision_tower': 2e-5,
-                    'paligemma_language_model': 2e-5,
-                    'classifier': 5e-5,
-                    'embed_tokens': 1e-5, # <<< Use a very small LR
-                    'phobert_adapter': 5e-5
+                    'qwen2_5_vl_visual': 1e-6,
+                    'qwen2_5_vl_language_model': 1e-6,
+                    'classifier': 1e-4,
+                    'embed_tokens': 1e-6, # <<< Use a very small LR
+                    'phobert_adapter': 1e-4
                 }
             }
 
         optimizer = create_stage_optimizer(model, stage_config, args)
-        # setup_model_for_stage(model, stage_config)
+        setup_model_for_stage(model, stage_config)
         if args.resume != '':
             model, optimizer, args.start_epoch = my_auto_resume(args, model=model, optimizer=optimizer, device=device)
 
-        log_model_architecture(model, args.output_dir, "PALIGEMMA_LORA") # Log architecture for standard training too
+        # log_model_architecture(model, args.output_dir, "QWEN2_5_VL_LORA") # Log architecture for standard training too
         log_training_config(args.output_dir, stage_config)
 
         metric_trackers = {

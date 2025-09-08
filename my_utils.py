@@ -128,33 +128,7 @@ def my_save_model(
 
 
 def my_auto_resume(args, model, optimizer=None, device='cuda'):
-    """
-    Automatically resume the latest checkpoint if available.
 
-    Args:
-        args: .
-        model (nn.Module): The PaLI model instance.
-        optimizer (torch.optim.Optimizer): The optimizer instance.
-        device (str): The device to map the checkpoint to.
-
-    Returns:
-        model: Model with loaded weights.
-        optimizer: Optimizer with loaded state if provided.
-        epoch (int): The epoch to resume from.
-
-    Sample usage:
-    ```
-    model = PaLI(...)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-
-    model, optimizer, args.start_epoch = pali_auto_resume(
-        args,
-        model=model,
-        optimizer=optimizer,
-        device=device
-    )
-    ```
-    """
     checkpoint_path = None
     ckpt_dir = Path(args.output_dir, "checkpoints")
 

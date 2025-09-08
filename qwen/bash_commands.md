@@ -1,14 +1,14 @@
 ```bash
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-torchrun --nproc-per-node=1 train_paligemma.py \
-    --batch_size 4 \
-    --eval_batch_size 4 \
+torchrun --nproc-per-node=1 train_qwen2_5_vl.py \
+    --batch_size 1 \
+    --eval_batch_size 1 \
     --epochs 50 \
     --layer_decay 0.99 \
     --update_freq 1 \
     --warmup_epochs 0 \
     --data_path /home/21khac.dd/bm/data/vivqa \
-    --output_dir /home/21khac.dd/bm/paligemma-lora-6 \
+    --output_dir /home/21khac.dd/bm/qwen25vl-1 \
     --num_workers=10 \
     --weight_decay 0.05 \
     --save_ckpt_freq 1 \

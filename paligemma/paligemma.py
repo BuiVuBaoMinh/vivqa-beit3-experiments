@@ -243,22 +243,11 @@ def get_vivqa_paligemma_phobert_with_adapter(
         image_token = AddedToken(IMAGE_TOKEN, normalized=False, special=True)
         tokens_to_add = {"additional_special_tokens": [image_token]}
         phobert_tokenizer.add_special_tokens(tokens_to_add)
-        # NOTE: We do NOT add <loc****> and <seg***> tokens (EXTRA_TOKENS) to the PhoBERT tokenizer here.
+        # NOTE: We SUSPECT adding <loc****> and <seg***> tokens (EXTRA_TOKENS) to the PhoBERT tokenizer here.
                 # These tokens are used in some vision-language models (like PaLI-Gemma) for fine-grained grounding:
                 # - <loc****>: Refers to specific image regions or detected object locations.
                 # - <seg***> : Refers to text segments, often used in layout-aware inputs (e.g., document understanding).
-                #
-                # However, our current dataset does NOT contain any input text that references these tokens.
-                # Including 1,154 unused special tokens would unnecessarily increase the PhoBERT vocabulary size
-                # (from 64,000 to 65,154), leading to extra randomly initialized embeddings that:
-                #   - Increase memory usage
-                #   - Add trainable parameters without utility
-                #   - May destabilize fine-tuning
-                #
-                # Therefore, we only add the <image> token, which is required for vision-language fusion,
-                # and we skip adding EXTRA_TOKENS to keep the model compact and focused.
-
-                # phobert_tokenizer.add_tokens(EXTRA_TOKENS)
+        # phobert_tokenizer.add_tokens(EXTRA_TOKENS)
         phobert_tokenizer.add_bos_token = False
         phobert_tokenizer.add_eos_token = False
     image_token_id = phobert_tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
@@ -276,7 +265,13 @@ def get_vivqa_paligemma_phobert_with_adapter(
     # Initialize the adapter
     phobert_hidden_size = phobert_model.config.hidden_size # 768
     paligemma_hidden_size = paligemma_model.config.text_config.hidden_size # e.g., 2304
-    paligemma_model.phobert_embedding_adapter = nn.Linear(phobert_hidden_size, paligemma_hidden_size)
+    # paligemma_model.phobert_embedding_adapter = nn.Linear(phobert_hidden_size, paligemma_hidden_size)
+    adapter_hidden_dim = (phobert_hidden_size + paligemma_hidden_size) // 2
+    paligemma_model.phobert_embedding_adapter = nn.Sequential(
+        nn.Linear(phobert_hidden_size, adapter_hidden_dim),
+        nn.GELU(),
+        nn.Linear(adapter_hidden_dim, paligemma_hidden_size)
+    )
 
     print("\nReplacing Paligemma's LM embeddings with PhoBERT's and enabling adapter...")
     
