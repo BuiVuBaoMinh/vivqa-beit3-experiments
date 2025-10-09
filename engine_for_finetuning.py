@@ -205,8 +205,14 @@ class VQAHandler(TaskHandler):
         logits = model(
             image=image, question=language_tokens, 
             padding_mask=padding_mask)
+
+        batch_size = language_tokens.shape[0]
+        scores = utils.VQAScore()(logits, labels) * 100.0
+
         return {
             "loss": self.criterion(input=logits.float(), target=labels.float()) * labels.shape[1], 
+            "scores": scores, \
+            "batch_size": batch_size,
         }
 
     def before_eval(self, metric_logger, data_loader, **kwargs):
@@ -222,49 +228,9 @@ class VQAHandler(TaskHandler):
         if labels is not None:
             scores = utils.VQAScore()(logits, labels) * 100.0
             self.metric_logger.meters['score'].update(scores.item(), n=batch_size)
-        else:
-            _, preds = logits.max(-1)
-            for image_id, pred in zip(qid, preds):
-                self.predictions.append({
-                    "question_id": image_id.item(), 
-                    "answer": self.label2ans[pred.item()], 
-                })
 
-    def after_eval(self, **kwargs):
-        if len(self.predictions) == 0:
-            print('* Score {score.global_avg:.3f}'.format(score=self.metric_logger.score))
-            return {k: meter.global_avg for k, meter in self.metric_logger.meters.items()}, "score"
-        else:
-            return self.predictions, "prediction"
-
-class OpenViVQAHandler(TaskHandler):
-    def __init__(self) -> None:
-        super().__init__()
-        self.predictions = []
-        self.criterion = nn.BCEWithLogitsLoss(reduction='mean')
-        self.label2ans = None
-
-    def train_batch(self, model, image, language_tokens, padding_mask, labels):
-        logits = model(
-            image=image, question=language_tokens, 
-            padding_mask=padding_mask)
-        return {
-            "loss": self.criterion(input=logits.float(), target=labels.float()) * labels.shape[1], 
-        }
-
-    def before_eval(self, metric_logger, data_loader, **kwargs):
-        self.predictions.clear()
-        self.metric_logger = metric_logger
-        self.label2ans = data_loader.dataset.label2ans
-
-    def eval_batch(self, model, image, language_tokens, padding_mask, labels=None, qid=None):
-        logits = model(
-            image=image, question=language_tokens, 
-            padding_mask=padding_mask)
-        batch_size = language_tokens.shape[0]
-        if labels is not None:
-            scores = utils.VQAScore()(logits, labels) * 100.0
-            self.metric_logger.meters['score'].update(scores.item(), n=batch_size)
+            loss = self.criterion(input=logits.float(), target=labels.float()) * labels.shape[1]
+            self.metric_logger.meters['loss'].update(loss.item(), n=batch_size)
         else:
             _, preds = logits.max(-1)
             for image_id, pred in zip(qid, preds):
@@ -483,8 +449,8 @@ def get_handler(args):
         return NLVR2Handler()
     elif args.task == "vqav2":
         return VQAHandler()
-    elif args.task == "openvivqa":
-        return OpenViVQAHandler()
+    elif args.task == "vivqa":
+        return VQAHandler()
     elif args.task in ("flickr30k", "coco_retrieval"):
         return RetrievalHandler()
     elif args.task in ("coco_captioning", "nocaps"):
@@ -517,6 +483,7 @@ def train_one_epoch(
     else:
         optimizer.zero_grad()
 
+
     for data_iter_step, data in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         step = data_iter_step // update_freq
         global_step = start_steps + step  # global training iteration
@@ -547,6 +514,11 @@ def train_one_epoch(
 
         loss = results.pop("loss")
         loss_value = loss.item()
+
+        scores = results.pop("scores")
+        batch_size = results.pop("batch_size")
+
+        metric_logger.meters['score'].update(scores.item(), n=batch_size)
 
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
@@ -619,7 +591,6 @@ def train_one_epoch(
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
-
 @torch.no_grad()
 def evaluate(data_loader, model, device, handler):
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -633,7 +604,9 @@ def evaluate(data_loader, model, device, handler):
         for tensor_key in data.keys():
             data[tensor_key] = data[tensor_key].to(device, non_blocking=True)
 
-        with torch.cuda.amp.autocast():
+        # with torch.cuda.amp.autocast():
+        #     handler.eval_batch(model=model, **data)
+        with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
             handler.eval_batch(model=model, **data)
 
     # gather the stats from all processes

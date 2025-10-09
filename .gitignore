@@ -4,3 +4,5 @@ __pycache__/
 *.pyd
 *.swp
 .DS_Store
+*venv
+*.env

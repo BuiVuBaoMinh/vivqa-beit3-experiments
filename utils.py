@@ -16,6 +16,8 @@ import numpy as np
 from pathlib import Path
 from collections import defaultdict, deque
 from timm.utils import get_state_dict
+import re
+import glob
 
 import torch
 import torch.distributed as dist
@@ -24,6 +26,7 @@ import torch.nn.functional as F
 # from torch import inf
 from torchmetrics import Metric
 from tensorboardX import SummaryWriter
+import loralib as lora
 
 inf = float('inf')
 
@@ -445,10 +448,18 @@ def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epoch
 def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, model_ema=None):
     output_dir = Path(args.output_dir)
     if loss_scaler is not None:
-        checkpoint_paths = [output_dir / ('checkpoint-%s.pth' % epoch)]
+        checkpoint_dir = output_dir / "checkpoints"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        
+        checkpoint_paths = [checkpoint_dir / ('checkpoint-%s.pth' % epoch)]
         for checkpoint_path in checkpoint_paths:
+            if hasattr(args, 'enable_lora') and args.enable_lora:
+                model_state_dict = model_without_ddp.state_dict()
+            else:
+                model_state_dict = model_without_ddp.state_dict()
+
             to_save = {
-                'model': model_without_ddp.state_dict(),
+                'model': model_state_dict,
                 'optimizer': optimizer.state_dict(),
                 'epoch': epoch,
                 'scaler': loss_scaler.state_dict(),
@@ -459,6 +470,25 @@ def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, mo
                 to_save['model_ema'] = get_state_dict(model_ema)
 
             save_on_master(to_save, checkpoint_path)
+
+            # --- CHECKPOINT ROTATION LOGIC START ---
+            # Apply rotation only for regular, numbered checkpoints on the main process
+            if epoch != "best" and is_main_process():
+                # Find all regular checkpoints, sort them by epoch number
+                checkpoints = sorted(
+                    glob.glob(str(checkpoint_dir / 'checkpoint-*.pth')),
+                    key=lambda f: int(re.search(r'checkpoint-(\d+)\.pth', f).group(1)) if re.search(r'checkpoint-(\d+)\.pth', f) else -1
+                )
+                
+                # Filter out any non-matching patterns and the 'best' checkpoint
+                checkpoints = [ck for ck in checkpoints if "best" not in Path(ck).name and re.search(r'checkpoint-(\d+)\.pth', ck)]
+
+                # If we have more than 3 checkpoints, delete the oldest ones
+                if len(checkpoints) > 5:
+                    for ckpt_to_delete in checkpoints[:-3]:
+                        print(f"Deleting old checkpoint: {ckpt_to_delete}")
+                        os.remove(ckpt_to_delete)
+            # --- CHECKPOINT ROTATION LOGIC END ---
     else:
         client_state = {'epoch': epoch, "args": args}
         if model_ema is not None:
@@ -471,28 +501,37 @@ def auto_load_model(args, model, model_without_ddp, optimizer, loss_scaler, mode
     if loss_scaler is not None:
         # torch.amp
         if args.auto_resume and len(args.resume) == 0:
+            checkpoint_dir = output_dir / "checkpoints"
             import glob
-            all_checkpoints = glob.glob(os.path.join(output_dir, 'checkpoint-*.pth'))
+            all_checkpoints = glob.glob(os.path.join(checkpoint_dir, 'checkpoint-*.pth'))
             latest_ckpt = -1
             for ckpt in all_checkpoints:
                 t = ckpt.split('-')[-1].split('.')[0]
                 if t.isdigit():
                     latest_ckpt = max(int(t), latest_ckpt)
             if latest_ckpt >= 0:
-                args.resume = os.path.join(output_dir, 'checkpoint-%d.pth' % latest_ckpt)
+                args.resume = os.path.join(checkpoint_dir, 'checkpoint-%d.pth' % latest_ckpt)
             print("Auto resume checkpoint: %s" % args.resume)
 
         if args.resume:
             if args.resume.startswith('https'):
                 checkpoint = torch.hub.load_state_dict_from_url(
-                    args.resume, map_location='cpu', check_hash=True)
+                    args.resume, map_location='cpu', check_hash=True, weights_only=False)
             else:
-                checkpoint = torch.load(args.resume, map_location='cpu')
-            model_without_ddp.load_state_dict(checkpoint['model'])
+                checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
+
+            # When resuming, the checkpoint might be a full one or a LoRA-only one.
+            # Using strict=False allows loading either, as it won't error on missing keys.
+            print("Loading model state dict with strict=False to support LoRA checkpoints.")
+            model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
+
             print("Resume checkpoint %s" % args.resume)
             if 'optimizer' in checkpoint and 'epoch' in checkpoint:
                 optimizer.load_state_dict(checkpoint['optimizer'])
-                args.start_epoch = checkpoint['epoch'] + 1
+                if 'best' not in args.resume:
+                    args.start_epoch = checkpoint['epoch'] + 1
+                else:
+                    args.start_epoch = 0
                 if hasattr(args, 'model_ema') and args.model_ema:
                     _load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
                 if 'scaler' in checkpoint:
@@ -524,7 +563,7 @@ def load_model_and_may_interpolate(ckpt_path, model, model_key, model_prefix):
         checkpoint = torch.hub.load_state_dict_from_url(
             ckpt_path, map_location='cpu', check_hash=True)
     else:
-        checkpoint = torch.load(ckpt_path, map_location='cpu')
+        checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False)
 
     print("Load ckpt from %s" % ckpt_path)
     checkpoint_model = None
@@ -836,6 +875,15 @@ class BeamHypotheses(object):
 
 
 def dump_predictions(args, result, file_suffix):
+
+    if not args.distributed:
+        # If not in distributed mode, just save the results directly.
+        result_file = os.path.join(args.output_dir, f"submit_{file_suffix}.json")
+        with open(result_file, "w") as fp:
+            json.dump(result, fp, indent=2, ensure_ascii=False)
+        print("Infer %d examples into %s" % (len(result), result_file))
+        return result_file
+    
     global_rank = get_rank()
     jsons = None
     if global_rank >= 0:
@@ -874,7 +922,7 @@ def dump_predictions(args, result, file_suffix):
     result_file = os.path.join(args.output_dir, f"submit_{file_suffix}.json")
     if jsons is not None:
         with open(result_file, "w") as fp:
-            json.dump(jsons, fp, indent=2)
+            json.dump(jsons, fp, indent=2, ensure_ascii=False)
         print("Infer %d examples into %s" % (len(jsons), result_file))
     return result_file
 
@@ -912,3 +960,56 @@ def coco_caption_eval(gt_dir, results_file, split):
         res_dict[metric] = score
     
     return res_dict
+
+# Custom utils for Vietnamese Integration experiments
+def get_best_meters_and_no_improvement_streak(output_dir, early_stopping_metric=None):
+    log_path = os.path.join(output_dir, "log.txt")
+    
+    max_accuracy = 0.0
+    min_val_loss = float('inf')
+
+    val_scores = []
+    val_losses = []
+
+    if not os.path.exists(log_path):
+        print(f"Log file not found at: {log_path}")
+        return max_accuracy, min_val_loss, 0
+
+    with open(log_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or not line.startswith('{'):
+                continue  # skip malformed or empty lines
+            try:
+                entry = json.loads(line)
+                if 'val_score' in entry:
+                    val = entry['val_score']
+                    val_scores.append(val)
+                    max_accuracy = max(max_accuracy, val)
+                if 'val_loss' in entry:
+                    loss = entry['val_loss']
+                    val_losses.append(loss)
+                    min_val_loss = min(min_val_loss, loss)
+            except json.JSONDecodeError:
+                continue  # skip bad JSON lines
+
+    if early_stopping_metric == "val_score":
+        metric_list = val_scores
+        best_value = max_accuracy
+        comparison = lambda x: x < best_value
+    elif early_stopping_metric == "val_loss":
+        metric_list = val_losses
+        best_value = min_val_loss
+        comparison = lambda x: x > best_value
+    else:
+        raise ValueError("Invalid early_stopping_metric. Use 'val_score' or 'val_loss'.")
+
+    # Calculate epochs without improvement
+    epochs_without_improvement = 0
+    for val in reversed(metric_list):
+        if comparison(val):
+            epochs_without_improvement += 1
+        else:
+            break
+
+    return max_accuracy, min_val_loss, epochs_without_improvement

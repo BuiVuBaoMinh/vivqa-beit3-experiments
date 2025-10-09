@@ -18,10 +18,11 @@ from timm.data.transforms import RandomResizedCropAndInterpolation
 from timm.data import create_transform
 
 import utils
-from glossary import normalize_word
+from glossary import normalize_word, segment_normalize
 from randaug import RandomAugment
 
-from deep_translator import GoogleTranslator
+# from deep_translator import GoogleTranslator
+import sys
 
 
 class BaseDataset(torch.utils.data.Dataset):
@@ -565,6 +566,282 @@ class VQAv2Dataset(BaseDataset):
                 }
                 writer.write("%s\n" % json.dumps(to_json))
 
+class ViVQADataset(BaseDataset):
+    def __init__(self, data_path, **kwargs):
+        super().__init__(data_path=data_path, **kwargs)
+        ans2label_file = os.path.join(data_path, "answer2label.txt")
+        ans2label = {}
+        label2ans = []
+        with open(ans2label_file, mode="r", encoding="utf-8") as reader:
+            for i, line in enumerate(reader):
+                data = json.loads(line)
+                ans = data["answer"]
+                label = data["label"]
+                label = int(label)
+                assert label == i
+                ans2label[ans] = i
+                label2ans.append(ans)
+        
+        self.ans2label = ans2label
+        self.label2ans = label2ans
+
+    @staticmethod
+    def get_index_files(split, task=None):
+        if split == "train":
+            return ("vivqa.train.jsonl", "vivqa.trainable_val.jsonl")
+        elif split == "val":
+            return ("vivqa.trainable_val.jsonl", )
+        elif split == "test":
+            return ("vivqa.test.jsonl", )           
+        else:
+            raise RuntimeError("split %s is not found!" % split)
+
+    def __getitem__(self, index: int):
+        data = super().__getitem__(index)
+        if "labels" in self.items[index] and len(self.items[index]["labels"]) > 0:
+            labels = [0.] * len(self.label2ans)
+            for l, s in zip(self.items[index]["labels"], self.items[index]["scores"]):
+                labels[l] = s
+            data["labels"] = torch.FloatTensor(labels)
+        else:
+            data["qid"] = self.items[index]["qid"]
+        return data
+
+    @classmethod
+    def make_dataset_index(cls, data_path, tokenizer_spm, tokenizer_phobert, annotation_data_path, predefined_dict_path=None):
+
+        with open(os.path.join(annotation_data_path, "train_vi_full.json"), "r") as fp:
+            train_vivqa_vi = json.load(fp)
+        with open(os.path.join(annotation_data_path, "test_vi.json"), "r") as fp:
+            test_vivqa_vi = json.load(fp)
+
+        with open(os.path.join(annotation_data_path, "train_en_full.json"), "r") as fp:
+            train_vivqa_en = json.load(fp)
+        with open(os.path.join(annotation_data_path, "test_en.json"), "r") as fp:
+            test_vivqa_en = json.load(fp)
+
+        # Split 1000 examples from train set as validation (since no val split is provided)
+        print(f"Total annotations from train: vi-{len(train_vivqa_vi)}, en-{len(train_vivqa_en)}")
+
+        # Shuffle together
+        combined = list(zip(train_vivqa_vi, train_vivqa_en))
+        random.shuffle(combined)
+        train_vivqa_vi, train_vivqa_en = zip(*combined)
+
+        # Convert back to list
+        train_vivqa_vi = list(train_vivqa_vi)
+        train_vivqa_en = list(train_vivqa_en)
+
+        val_vivqa_vi = train_vivqa_vi[:1000]
+        train_vivqa_vi = train_vivqa_vi[1000:]
+
+        val_vivqa_en = train_vivqa_en[:1000]
+        train_vivqa_en = train_vivqa_en[1000:]
+
+
+        annotations_vi = dict()
+        annotations_en = dict()
+
+        for split, questions in zip(
+            ["train", "val", "test"],
+            [train_vivqa_vi, val_vivqa_vi, test_vivqa_vi],
+        ):
+            _annot = defaultdict(dict)
+            for q in questions:
+                question_text = q["question"]
+                tokens = tokenizer_phobert.tokenize(question_text)
+                token_ids = tokenizer_phobert.convert_tokens_to_ids(tokens)
+
+                assert q["id"] not in _annot[q["image"]]
+                _annot[q["image"]][q["id"]] = {
+                    "question": question_text, 
+                    "token_ids": token_ids, 
+                }
+
+            annotations_vi[split] = _annot
+
+        for split, questions in zip(
+            ["train", "val", "test"],
+            [train_vivqa_en, val_vivqa_en, test_vivqa_en],
+        ):
+            _annot = defaultdict(dict)
+            for q in questions:
+                question_text = q["question"]
+                tokens = tokenizer_spm.tokenize(question_text)
+                token_ids = tokenizer_spm.convert_tokens_to_ids(tokens)
+
+                assert q["id"] not in _annot[q["image"]]
+                _annot[q["image"]][q["id"]] = {
+                    "question": question_text, 
+                    "token_ids": token_ids, 
+                }
+
+            annotations_en[split] = _annot
+
+        all_major_answers = list()
+        
+        if not predefined_dict_path:
+            for split, annots in zip(
+                ["train", "val"], [train_vivqa_vi, val_vivqa_vi],
+            ):
+                # _annot = annotations[split]
+                for q in annots:
+                    all_major_answers.append(q["answer"])
+
+            all_major_answers = [segment_normalize(word) for word in all_major_answers]
+            counter = {k: v for k, v in Counter(all_major_answers).items() if v >= 0}
+            ans2label = {k: i for i, k in enumerate(counter.keys())}
+            label2ans = list(counter.keys())
+        else:
+            ans2label = {}
+            label2ans = []
+            with open(predefined_dict_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    item = json.loads(line)
+                    ans = item["answer"]
+                    label = item["label"]
+                    ans2label[ans] = label
+
+            # Create label2ans list, assuming labels are sequential starting from 0
+            label2ans = [None] * (max(ans2label.values()) + 1)
+            for ans, label in ans2label.items():
+                label2ans[label] = ans
+
+        print(f"Number of labels {len(ans2label)}")
+
+        for annotations in [annotations_vi, annotations_en]:
+            for split, annots in zip(
+                ["train", "val"], [train_vivqa_vi, val_vivqa_vi],
+            ):
+                _annot = annotations[split]
+                for q in annots:
+                    answer = q["answer"]
+
+                    labels = []
+                    scores = []
+
+                    answer = segment_normalize(answer)
+                    labels.append(ans2label[answer])
+                    scores.append(1.0)
+
+                    assert "labels" not in _annot[q["image"]][q["id"]]
+                    assert "question" in _annot[q["image"]][q["id"]]
+                    _annot[q["image"]][q["id"]]["labels"] = labels
+                    _annot[q["image"]][q["id"]]["scores"] = scores
+
+            for split in ["train", "val"]:
+                filtered_annot = dict()
+                for ik, iv in annotations[split].items():
+                    new_q = dict()
+                    for qk, qv in iv.items():
+                        if len(qv["labels"]) != 0:
+                            new_q[qk] = qv
+                    if len(new_q) != 0:
+                        filtered_annot[ik] = new_q
+                annotations[split] = filtered_annot
+
+        split2items_vi = {}
+        split2items_en = {}
+        for split in ["train", "val", "test"]:
+            annot_vi = annotations_vi[split]
+            annot_en = annotations_en[split]
+            split_name = {
+                "train": "train",
+                "val": "train",
+                "test": "test",
+            }[split]
+            paths = list(glob.glob(f"{data_path}/images/{split_name}/*.jpg"))
+            random.shuffle(paths)
+            annot_paths = [path for path in paths \
+                if int(path.split("/")[-1][:-4]) in annot_vi]
+
+            if len(paths) == len(annot_paths):
+                print("all images have caption annotations")
+            else:
+                print("not all images have caption annotations")
+            print(len(paths), len(annot_paths), len(annot_vi))
+
+            items_vi = []
+            items_en = []
+            for path in annot_paths:
+                iid = int(path.split("/")[-1][:-4])
+                _annot_vi = annotations_vi[split][iid]
+                _annot_en = annotations_en[split][iid]
+                for qid in _annot_vi:
+                    q_vi = _annot_vi[qid]
+                    q_en = _annot_en[qid]
+
+                    if split in ["train", "val"]:
+                        labels = q_vi["labels"]
+                        scores = q_vi["scores"]
+                    else:
+                        labels, scores = [], []
+
+                    items_vi.append({
+                        "image_path": os.path.join("images", split_name, path.split('/')[-1]), 
+                        "text_segment": q_vi["token_ids"], 
+                        "labels": labels, 
+                        "scores": scores, 
+                        "qid": qid, 
+                    })
+
+                    items_en.append({
+                        "image_path": os.path.join("images", split_name, path.split('/')[-1]), 
+                        "text_segment": q_en["token_ids"], 
+                        "labels": labels, 
+                        "scores": scores, 
+                        "qid": qid, 
+                    })
+
+            split2items_vi[split] = items_vi
+            split2items_en[split] = items_en
+
+            _write_data_into_jsonl(items=items_vi, jsonl_file=os.path.join(data_path, "vivqa_vi.%s.jsonl" % split))
+            _write_data_into_jsonl(items=items_en, jsonl_file=os.path.join(data_path, "vivqa_en.%s.jsonl" % split))
+
+        # Following ViLT, we use 1000 images of the original val set as the final val set        
+        val_image2items_vi = defaultdict(list)
+        val_image2items_en = defaultdict(list)
+
+        for item in split2items_vi["val"]:
+            val_image2items_vi[item["image_path"]].append(item)
+
+        for item in split2items_en["val"]:
+            val_image2items_en[item["image_path"]].append(item)
+        
+        print("Contains %d image and %d pairs for val set!" % (len(val_image2items_vi), len(split2items_vi["val"])))
+
+        val_images = list(val_image2items_vi.keys())
+        random.shuffle(val_images)
+        trainable_val_vi = []
+        rest_val_vi = []
+        trainable_val_en = []
+        rest_val_en = []
+        for i, image_id in enumerate(val_images):
+            if i > 1000:
+                rest_val_vi += val_image2items_vi[image_id]
+                rest_val_en += val_image2items_en[image_id]
+            else:
+                trainable_val_vi += val_image2items_vi[image_id]
+                trainable_val_en += val_image2items_en[image_id]
+        
+        _write_data_into_jsonl(items=trainable_val_vi, jsonl_file=os.path.join(data_path, "vivqa_vi.trainable_val.jsonl"))
+        _write_data_into_jsonl(items=rest_val_vi, jsonl_file=os.path.join(data_path, "vivqa_vi.rest_val.jsonl"))
+
+        _write_data_into_jsonl(items=trainable_val_en, jsonl_file=os.path.join(data_path, "vivqa_en.trainable_val.jsonl"))
+        _write_data_into_jsonl(items=rest_val_en, jsonl_file=os.path.join(data_path, "vivqa_en.rest_val.jsonl"))
+
+        # with open(os.path.join(data_path, "answer2label.txt"), mode="w", encoding="utf-8") as writer:
+        #     for ans in ans2label:
+        #         to_json = {
+        #             "answer": ans, 
+        #             "label": ans2label[ans]
+        #         }
+        #         writer.write("%s\n" % json.dumps(to_json, ensure_ascii=False))
+        
 class OpenViVQADataset(BaseDataset):
     def __init__(self, data_path, **kwargs):
         super().__init__(data_path=data_path, **kwargs)
@@ -920,6 +1197,7 @@ task2dataset = {
     "nocaps": CaptioningDataset,
     "imagenet": ImageNetDataset,
     "openvivqa": OpenViVQADataset,
+    "vivqa": ViVQADataset,
 }
 
 
@@ -1024,10 +1302,14 @@ def get_sentencepiece_model_for_beit3(args):
     return XLMRobertaTokenizer(args.sentencepiece_model)
 
 
-def create_dataset_by_split(args, split, is_train=True):
+def create_dataset_by_split(args, split, is_train=True, phobert_tokenizer=None):
     transform = build_transform(is_train=is_train, args=args)
     dataset_class = task2dataset[args.task]
-    tokenizer = get_sentencepiece_model_for_beit3(args)
+
+    if args.task == 'vivqa' and args.phobert:
+        tokenizer = phobert_tokenizer
+    else:
+        tokenizer = get_sentencepiece_model_for_beit3(args)
 
     opt_kwargs = {}
     if args.task in ["coco_captioning", "nocaps"]:
@@ -1052,10 +1334,12 @@ def create_dataset_by_split(args, split, is_train=True):
     )
 
 
-def create_downstream_dataset(args, is_eval=False):
+def create_downstream_dataset(args, is_eval=False, phobert_tokenizer=None):
     if is_eval:
-        return create_dataset_by_split(args, split="test", is_train=False)
+        return create_dataset_by_split(args, split="test", is_train=False, phobert_tokenizer=phobert_tokenizer)
+        # return create_dataset_by_split(args, split="test", is_train=True, phobert_tokenizer=phobert_tokenizer)
     else:
         return \
-            create_dataset_by_split(args, split="train", is_train=True), \
-            create_dataset_by_split(args, split="val", is_train=True)
+            create_dataset_by_split(args, split="train", is_train=True, phobert_tokenizer=phobert_tokenizer), \
+            create_dataset_by_split(args, split="val", is_train=True, phobert_tokenizer=phobert_tokenizer), \
+            create_dataset_by_split(args, split="train", is_train=False, phobert_tokenizer=phobert_tokenizer)

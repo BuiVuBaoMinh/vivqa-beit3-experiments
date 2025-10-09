@@ -8,15 +8,15 @@ import sys
 
 nltk.download('wordnet') # run this once
 
-with open("/home/lenovo/exp1/data/openvivqa/vqa/openvivqa_test_v2.json", "r", encoding="utf-8") as f:
+with open("/home/lenovo/exp1/data/vivqa/annotations/original/test.json", "r", encoding="utf-8") as f:
     data = json.load(f)
 
 # print(data[0])
 
-gt_dict = {item["id"]: item["answers"][0] for item in data["annotations"]}
+gt_dict = {item["id"]: item["answer"] for item in data}
 
 
-with open("/home/lenovo/exp1/output-dir/submit_openvivqa_test.json", "r", encoding="utf-8") as f:
+with open("/home/lenovo/exp1/output-dir/submit_vivqa_test.json", "r", encoding="utf-8") as f:
     predictions = json.load(f)
 
 # print(predictions[0])
@@ -39,6 +39,7 @@ smoothie = SmoothingFunction().method4
 bleu_scores = []
 meteor_scores = []
 exact_match = []
+wrong_pairs = []
 
 for qid, pred in pred_dict.items():
     gt = gt_dict.get(qid)
@@ -49,10 +50,20 @@ for qid, pred in pred_dict.items():
         bleu = sentence_bleu([gt_tokens], pred_tokens, smoothing_function=smoothie)
         meteor = meteor_score([gt_tokens], pred_tokens)
         exact = int(gt.strip().lower() == pred.strip().lower())
+        # save pairs that are not exact match as json
+        if exact == 0:
+            wrong_pairs.append({
+                "question_id": qid,
+                "gt": gt,
+                "pred": pred
+            })       
 
         bleu_scores.append(bleu)
         meteor_scores.append(meteor)
         exact_match.append(exact)
+
+with open("wrong_pairs.json", "a", encoding='utf-8') as f:
+    json.dump(wrong_pairs, f, ensure_ascii=False, indent=4) 
 
 print(f"BLEU Score: {np.mean(bleu_scores):.4f}")
 print(f"METEOR Score: {np.mean(meteor_scores):.4f}")
