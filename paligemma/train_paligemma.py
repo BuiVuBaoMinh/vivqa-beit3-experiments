@@ -78,11 +78,13 @@ def get_args():
 
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
+    parser.add_argument('--checkpoint_dir', default='',
+                        help='path where to save checkpoints') # Move to disk due to reduced max storage from server admin
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
     parser.add_argument('--resume', default='',
                         help='resume from checkpoint')
-    parser.add_argument('--auto_resume', action='store_true') # For PaLI, resumes the last epoch
+    parser.add_argument('--auto_resume', action='store_true')
     parser.add_argument('--no_auto_resume', action='store_false', dest='auto_resume')
     parser.set_defaults(auto_resume=True)
 
@@ -559,15 +561,16 @@ def main(args):
     # These are common linear layers in transformer architectures
     lora_target_modules = (
         r"paligemma\.language_model\.layers\.\d+\."
-        r"(self_attn\.(q_proj|k_proj|v_proj|o_proj)|mlp\.(gate_proj|up_proj|down_proj))"
+        # r"(self_attn\.(q_proj|k_proj|v_proj|o_proj)|mlp\.(gate_proj|up_proj|down_proj))"
+        r"(self_attn\.(q_proj|v_proj))"
     )
 
 
     # lora_target_modules = ["q_proj", "v_proj"]
 
     config = LoraConfig(
-        r=16,  # LoRA rank
-        lora_alpha=32,  # LoRA scaling, convention is to set it to 2 * r.
+        r=64,  # LoRA rank
+        lora_alpha=128,  # LoRA scaling, convention is to set it to 2 * r.
         target_modules=lora_target_modules,
         lora_dropout=0.05,
         bias="none",

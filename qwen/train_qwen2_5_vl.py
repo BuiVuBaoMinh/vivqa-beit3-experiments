@@ -75,14 +75,18 @@ def get_args():
                         help='dataset path')
     parser.add_argument('--answer2label', default=None, type=str,
                         help='answer2label.txt path')
+    parser.add_argument('--max_pixels', type=int, default=224*224,
+                        help='Maximum number of pixels for image processing (default: 224*224=50176)')
 
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
+    parser.add_argument('--checkpoint_dir', default=None, type=str,
+                        help='Separate path to save checkpoints. If None, uses output_dir.')
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
     parser.add_argument('--resume', default='',
                         help='resume from checkpoint')
-    parser.add_argument('--auto_resume', action='store_true') # For PaLI, resumes the last epoch
+    parser.add_argument('--auto_resume', action='store_true')
     parser.add_argument('--no_auto_resume', action='store_false', dest='auto_resume')
     parser.set_defaults(auto_resume=True)
 
@@ -121,6 +125,20 @@ def get_args():
     parser.add_argument('--no_resume_optimizer', action="store_true", default=False,
                         help="This parameter prevents auto loading optimizer from checkpoint")
     
+    # Quantization & LoRA Parameters
+    model_parser = parser.add_argument_group('Model (Quantization & LoRA) Parameters')
+    model_parser.add_argument('--quantize_4bit', action='store_true', default=False,
+                              help='Enable 4-bit quantization via bitsandbytes')
+    model_parser.add_argument('--use_lora', action='store_true', default=True,
+                              help='Enable LoRA (PEFT)')
+    model_parser.add_argument('--no_lora', action='store_false', dest='use_lora',
+                              help='Disable LoRA (PEFT)')
+    model_parser.add_argument('--lora_r', type=int, default=16,
+                              help='LoRA rank (r)')
+    model_parser.add_argument('--lora_alpha', type=int, default=32,
+                              help='LoRA alpha')
+    model_parser.add_argument('--lora_dropout', type=float, default=0.05,
+                              help='LoRA dropout')
 
     known_args, _ = parser.parse_known_args()
     
@@ -218,11 +236,9 @@ def log_qwen2_5_vl_model_config(model: Qwen_2_5_VL_ForVQAClassification, output_
 def setup_model_for_stage(model: Qwen_2_5_VL_ForVQAClassification, stage_config):
     print(f"--- Configuring model for stage: {stage_config['name']} ---")
 
-    # This logic assumes a "start trainable and freeze some" approach
-    # which is simpler. First, set everything to trainable.
-    for param in model.parameters():
-        if param.dtype in [torch.float, torch.float16, torch.bfloat16]:
-            param.requires_grad = True
+    # for param in model.parameters():
+    #     if param.dtype in [torch.float, torch.float16, torch.bfloat16]:
+    #         param.requires_grad = True
 
     if stage_config.get('freeze_qwen2_5_vl_visual', True):
         print("Qwen 2.5 VL's visual is FROZEN.")
@@ -525,11 +541,15 @@ def main(args):
     if args.phobert:
         phobert_tokenizer = Qwen2_5_VLFitPhobertTokenizer.from_pretrained("vinai/phobert-base-v2", use_fast=True)
 
-    print("Defining 4-bit bitsandbytes quantization config...")
-    quantization_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch.bfloat16,
-    )
+    # --- MODIFIED ---
+    quantization_config = None
+    if args.quantize_4bit:
+        print("Defining 4-bit bitsandbytes quantization config...")
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+        )
+    # --- END MODIFIED ---
 
     if args.phobert:
         # model = get_vivqa_paligemma_phobert(device=device, answer2label_path=args.answer2label).to(device, non_blocking=True, dtype=dtype)
@@ -538,45 +558,56 @@ def main(args):
         # ).to(device, non_blocking=True, dtype=dtype)
         model = get_vivqa_qwen_2_5_vl_phobert_with_adapter(
             device=device,
-            answer2label_path=args.answer2label
+            answer2label_path=args.answer2label,
+            quantization_config=quantization_config, # --- MODIFIED ---
         ).to(device, non_blocking=True, dtype=dtype)
     else:
         model = get_vivqa_qwen_2_5_vl(
             device = device, 
             answer2label_path=args.answer2label,
-            quantization_config=quantization_config,
+            quantization_config=quantization_config, # --- MODIFIED ---
         ).to(device, non_blocking=True, dtype=dtype)
 
     log_model_architecture(model, args.output_dir, "BASE_QWEN2_5_VL")
 
     model.gradient_checkpointing_enable()
-    model = prepare_model_for_kbit_training(model)
+    
+    # --- MODIFIED ---
+    # Only prepare for kbit training if we actually quantized
+    if args.quantize_4bit:
+        model = prepare_model_for_kbit_training(model)
 
-    # # --- ADD THIS DEBUGGING CODE ---
-    # print("--- Finding available module names for LoRA ---")
-    # for name, module in model.named_modules():
-    #     if isinstance(module, torch.nn.Linear): # Optional: Filter for Linear layers
-    #         print(name)
-    # print("---------------------------------------------")
+    # --- MODIFIED ---
+    if args.use_lora:
+        print("--- Applying LoRA (PEFT) ---")
+        # --- Define the LoRA Configuration ---
+        lora_target_modules = (
+            r"(qwen_2_5_vl\.language_model\.layers\.\d+\.)|(qwen_2_5_vl\.visual\.blocks\.\d+\.)"
+            # r"(self_attn\.(q_proj|k_proj|v_proj|o_proj)|mlp\.(gate_proj|up_proj|down_proj))|(attn\.qkv)"
+            r"(self_attn\.(q_proj|v_proj)|(attn\.qkv))"
+        )
+        
+        # Dynamically set modules to save
+        modules_to_save = ['classifier']
+        if args.phobert and hasattr(model, 'phobert_embedding_adapter'):
+             modules_to_save.append('phobert_embedding_adapter')
+        print(f"LoRA modules_to_save: {modules_to_save}")
 
-    # --- Define the LoRA Configuration ---
-    lora_target_modules = (
-        r"(qwen_2_5_vl\.language_model\.layers\.\d+\.)|(qwen_2_5_vl\.visual\.blocks\.\d+\.)"
-        r"(self_attn\.(q_proj|k_proj|v_proj|o_proj)|mlp\.(gate_proj|up_proj|down_proj))|(attn\.qkv)"
-    )
+        config = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            target_modules=lora_target_modules,
+            lora_dropout=args.lora_dropout,
+            bias="none",
+            task_type="CAUSAL_LM",
+            modules_to_save=modules_to_save
+        )
 
-    config = LoraConfig(
-        r=16,  # LoRA rank
-        lora_alpha=32,  # LoRA scaling, convention is to set it to 2 * r.
-        target_modules=lora_target_modules,
-        lora_dropout=0.05,
-        bias="none",
-        task_type="CAUSAL_LM",
-        modules_to_save=['phobert_embedding_adapter', 'classifier']
-    )
-
-    # Wrap the model with PEFT
-    model = get_peft_model(model, config)
+        # Wrap the model with PEFT
+        model = get_peft_model(model, config)
+    else:
+        print("--- LoRA (PEFT) is DISABLED ---")
+    # --- END MODIFIED ---
 
     dataset_train, data_loader_train, dataset_val, data_loader_val = create_qwen2_5_vl_datasets(
         args,
@@ -678,17 +709,19 @@ def main(args):
     else:
         # --- ORIGINAL TRAINING LOGIC ---
         print("--- Standard End-to-End Training Enabled ---")
-        num_layers = model.get_num_layers()
-        if args.layer_decay < 1.0:
-            lrs = list(args.layer_decay ** (num_layers + 1 - i) for i in range(num_layers + 2))
-            assigner = LayerDecayValueAssigner(lrs)
-        elif args.task_head_lr_weight > 1:
-            assigner = LayerDecayValueAssigner([1.0, args.task_head_lr_weight], scale_handler=get_is_head_flag_for_vit)
-        else:
-            assigner = None
         
-        if assigner is not None:
-            print("Assigned values = %s" % str(assigner.values))
+        # NOTE: Disable layer decay for when using
+        # num_layers = model.get_num_layers()
+        # if args.layer_decay < 1.0:
+        #     lrs = list(args.layer_decay ** (num_layers + 1 - i) for i in range(num_layers + 2))
+        #     assigner = LayerDecayValueAssigner(lrs)
+        # elif args.task_head_lr_weight > 1:
+        #     assigner = LayerDecayValueAssigner([1.0, args.task_head_lr_weight], scale_handler=get_is_head_flag_for_vit)
+        # else:
+        #     assigner = None
+        
+        # if assigner is not None:
+        #     print("Assigned values = %s" % str(assigner.values))
 
         # Encapsulate the original loop logic into a single stage config
         stage_config = {
@@ -713,7 +746,7 @@ def main(args):
         if args.resume != '':
             model, optimizer, args.start_epoch = my_auto_resume(args, model=model, optimizer=optimizer, device=device)
 
-        # log_model_architecture(model, args.output_dir, "QWEN2_5_VL_LORA") # Log architecture for standard training too
+        log_model_architecture(model, args.output_dir, f"QWEN2_5_VL_LoRA_{args.use_lora}") # Log architecture for standard training too
         log_training_config(args.output_dir, stage_config)
 
         metric_trackers = {
@@ -739,8 +772,6 @@ def main(args):
             metric_trackers=metric_trackers,
             stage_index=0
         )
-
-    # <<< END MODIFIED TRAINING LOGIC >>>
 
     total_time = time.time() - start_time
     total_time_str = str(time.strftime('%H hours, %M minutes, %S seconds', time.gmtime(total_time)))

@@ -24,17 +24,17 @@ PHOBERT_MODEL_ID = "vinai/phobert-base-v2"
 MY_CACHE_DIR = "/home/21khac.dd/bm/my-cache-dir"
 
 class Qwen_2_5_VL_ForVQAClassification(Qwen2_5_VLPreTrainedModel):
-    def __init__(self, config, num_labels, answer2label_path):
-        super().__init__(config)
+    def __init__(self, qwen_base_model, num_labels, answer2label_path):
+        super().__init__(qwen_base_model.config)
 
         self.answer2label, self.label2answer = self._load_answer_mappings(answer2label_path)
         self.num_labels = len(self.label2answer)
         print(f"Qwen_2_5_VL_ForVQAClassification: num_labels = {self.num_labels}")
         
-        self.qwen_2_5_vl = MyQwen_2_5_VL(config)
+        self.qwen_2_5_vl = qwen_base_model
         
         self.dropout = nn.Dropout(0.2)
-        self.classifier = nn.Linear(config.text_config.hidden_size, num_labels)
+        self.classifier = nn.Linear(qwen_base_model.config.text_config.hidden_size, num_labels)
 
         self.use_phobert_adapter = False
         self.phobert_embedding_adapter = None
@@ -161,31 +161,31 @@ def get_vivqa_qwen_2_5_vl(
         **kwargs
 ) -> Qwen_2_5_VL_ForVQAClassification:
     
-    if qwen_2_5_vl_config is None:
-        qwen_2_5_vl_config = Qwen2_5_VLConfig.from_pretrained(qwen_2_5_vl_model_id)
-
-    print(f"Instantiating custom Qwen_2_5_VL_ForVQAClassification shell with {num_labels} labels...")
-    model = Qwen_2_5_VL_ForVQAClassification(
-        config=qwen_2_5_vl_config, num_labels=num_labels, answer2label_path=answer2label_path
-    )
-
-    print("Loading full pre-trained and quantized PaliGemmaModel...")
+    print("Loading full pre-trained and quantized Qwen2_5_VLModel...")
+    # Step 1: Load the base model from Hugging Face with quantization enabled.
+    # The object created is of the class `Qwen2_5_VLModel`.
     base_qwen_2_5_vl_model = Qwen2_5_VLModel.from_pretrained(
         qwen_2_5_vl_model_id,
         cache_dir=MY_CACHE_DIR,
-        local_files_only=True,
-        **kwargs  # The quantization_config gets passed here
+        local_files_only=False,
+        **kwargs
     )
 
-    print("Manually copying pre-trained weights...")
-    model.qwen_2_5_vl.visual.load_state_dict(base_qwen_2_5_vl_model.visual.state_dict(), strict=False)
-    model.qwen_2_5_vl.language_model.load_state_dict(base_qwen_2_5_vl_model.language_model.state_dict(), strict=False)
-    print("✅ Pre-trained weights for vision and text models loaded successfully.")
+    print("Dynamically changing the class of the loaded model to MyQwen_2_5_VL...")
+    # Step 2: Change the class of the instance at runtime.
+    # The `base_qwen_2_5_vl_model` object is now an instance of your custom class.
+    # It inherits the custom `forward` method while retaining its quantized weights and layers.
+    base_qwen_2_5_vl_model.__class__ = MyQwen_2_5_VL
 
-    # Clean up the temporary model to save memory
-    del base_qwen_2_5_vl_model
-    torch.cuda.empty_cache()
+    print(f"Instantiating custom Qwen_2_5_VL_ForVQAClassification wrapper...")
+    # Step 3: Pass this modified, quantized object to your top-level wrapper.
+    model = Qwen_2_5_VL_ForVQAClassification(
+        qwen_base_model=base_qwen_2_5_vl_model, 
+        num_labels=num_labels, 
+        answer2label_path=answer2label_path
+    )
 
+    print("✅ Custom model with quantized base and custom forward method is ready.")
     return model
 
 def get_vivqa_qwen_2_5_vl_phobert_with_adapter(

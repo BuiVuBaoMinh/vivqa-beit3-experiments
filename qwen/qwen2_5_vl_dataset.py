@@ -4,7 +4,7 @@ import torch
 import sys
 
 from PIL import Image
-from transformers import Qwen2_5_VLProcessor, PhobertTokenizer, Qwen2TokenizerFast
+from transformers import Qwen2_5_VLProcessor, PhobertTokenizer, Qwen2TokenizerFast, Qwen2VLImageProcessor
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -40,8 +40,12 @@ class ViVQAQwen2_5_VLDataset(torch.utils.data.Dataset):
 
         self.image_dir = image_dir
 
+        # Use max_pixels from args, default to 224*224 if not present
+        max_pixels_to_use = getattr(args, 'max_pixels', 224*224)
+        print(f"Initializing Qwen2_5_VLProcessor with max_pixels = {max_pixels_to_use}")
         self.processor = Qwen2_5_VLProcessor.from_pretrained(
             qwen2_5_vl_model_id, use_fast=True,
+            max_pixels = max_pixels_to_use,
         )
 
         self.split = split
@@ -121,10 +125,10 @@ class ViVQAQwen2_5_VLDataset(torch.utils.data.Dataset):
         # )
         # print("--- Decoded Input ---")
         # print(decoded_text)
-        print(f"Length: {len(inputs['input_ids'].squeeze(0))}") # Verify the length
-        print(f"Length: {len(inputs['pixel_values'].squeeze(0))}")
-        print(f"Length: {len(inputs['attention_mask'].squeeze(0))}")
-        print("---------------------")
+        # print(f"Length: {len(inputs['input_ids'].squeeze(0))}") # Verify the length
+        # print(f"Length: {len(inputs['pixel_values'].squeeze(0))}")
+        # print(f"Length: {len(inputs['attention_mask'].squeeze(0))}")
+        # print("---------------------")
         # --- END DEBUGGING CODE ---
 
         pixel_values = inputs['pixel_values'].squeeze(0)
@@ -169,9 +173,8 @@ def create_qwen25vl_dataloader(dataset, is_train, batch_size, num_workers, pin_m
     )
 
 def create_qwen25vl_dataset_by_split(args, split, is_train=True, phobert_tokenizer=None):
-    # en_json_suffix = 'en'
+    en_json_suffix = 'en'
     vi_json_suffix = 'vi_en_ans'
-    en_json_suffix = 'vi_en_ans' # Qwen 2.5 VL supports Vie
 
     json_path = args.data_path + f"/vqa/{split}_{en_json_suffix if phobert_tokenizer is None else vi_json_suffix}.json"
     print(f"Creating dataset '{split}' from data path {json_path}")

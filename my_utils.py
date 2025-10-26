@@ -61,19 +61,8 @@ def my_dump_predictions(args, result, file_suffix): # Reuse code from unilm beit
 def my_save_model(
     args, epoch, model, optimizer
 ):
-    """
-    Save the PaLI model and optionally the optimizer and training state.
-    Due to lack of disk space, we:
-    - Keeps only 3 latest normal checkpoints by deleting the one with lowest epoch number.
-    - Keeps only 1 best checkpoint at a time, deleting the older best.
-    Max number of checkpoints-{int} and checkpoint-best-{int} can be modified in this function.
-
-    Args:
-        model (PaLI): PaLI model.
-        optimizer (torch.optim.Optimizer): Optimizer, for resume in future.
-        epoch (int): Current training epoch.
-    """
-    output_dir = Path(args.output_dir, "checkpoints")
+    output_dir = Path(args.checkpoint_dir, "checkpoints")
+    output_dir.mkdir(parents=True, exist_ok=True)
     filename = "checkpoint-%s" % epoch
     full_path = output_dir / filename
 
@@ -130,7 +119,7 @@ def my_save_model(
 def my_auto_resume(args, model, optimizer=None, device='cuda'):
 
     checkpoint_path = None
-    ckpt_dir = Path(args.output_dir, "checkpoints")
+    ckpt_dir = Path(args.checkpoint_dir, "checkpoints")
 
     # Case 1: Resume from 'best'
     if hasattr(args, 'resume') and args.resume == 'best':
@@ -169,7 +158,7 @@ def my_auto_resume(args, model, optimizer=None, device='cuda'):
     if checkpoint_path is not None and os.path.isfile(checkpoint_path):
         print(f"✅ Resuming from checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        model.load_state_dict(checkpoint['model'])
+        model.load_state_dict(checkpoint['model'], strict=False)
 
         if optimizer is not None and 'optimizer' in checkpoint and not args.no_resume_optimizer:
             optimizer.load_state_dict(checkpoint['optimizer'])

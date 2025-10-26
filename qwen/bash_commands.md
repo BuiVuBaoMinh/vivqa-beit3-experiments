@@ -4,11 +4,10 @@ torchrun --nproc-per-node=1 train_qwen2_5_vl.py \
     --batch_size 1 \
     --eval_batch_size 1 \
     --epochs 50 \
-    --layer_decay 0.99 \
     --update_freq 1 \
     --warmup_epochs 0 \
     --data_path /home/21khac.dd/bm/data/vivqa \
-    --output_dir /home/21khac.dd/bm/qwen25vl-1 \
+    --output_dir /home/21khac.dd/bm/qwen25vl-3-lora \
     --num_workers=10 \
     --weight_decay 0.05 \
     --save_ckpt_freq 1 \
@@ -28,14 +27,14 @@ torchrun --nproc-per-node=1 train_qwen2_5_vl.py \
 ```
 
 ```bash
-torchrun --nproc-per-node=1 train_paligemma.py \
-    --batch_size 8 \
-    --eval_batch_size 8 \
+torchrun --nproc-per-node=1 train_qwen2_5_vl.py \
+    --batch_size 1 \
+    --eval_batch_size 1 \
     --data_path /home/21khac.dd/bm/data/vivqa \
-    --output_dir /home/21khac.dd/bm/paligemma-lora-6  \
+    --output_dir /home/21khac.dd/bm/qwen25vl-2  \
     --staged_training \
     --answer2label "/home/21khac.dd/bm/data/vivqa/annotations/dicts/answer2label_en_gemini_translated.txt" \
-    --device "cuda:7" \
+    --device "cuda:2" \
     --eval \
     --resume "best" \
     --phobert
