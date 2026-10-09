@@ -210,7 +210,7 @@ def get_vivqa_blip2(
     model.blip2.qformer.load_state_dict(temp_generative_model.qformer.state_dict())
     model.blip2.language_model.load_state_dict(temp_generative_model.language_model.state_dict())
 
-    print("✅ Pre-trained weights for all components loaded successfully.")
+    print("Pre-trained weights for all components loaded successfully.")
 
     del temp_generative_model
     torch.cuda.empty_cache()
@@ -283,7 +283,7 @@ def get_vivqa_blip2_phobert(
     blip2_model.config.text_config.pad_token_id = phobert_tokenizer.pad_token_id
     blip2_model.config.image_token_index = image_token_id
 
-    print("✅ PhoBERT embedding transplant successful!")
+    print("PhoBERT embedding transplant successful!")
 
     return blip2_model
 
@@ -334,7 +334,7 @@ def get_vivqa_blip2_phobert_with_adapter(
     blip2_model.use_phobert_adapter = True
 
     print(f"Replaced LM embeddings. New embedding shape: {blip2_model.blip2.language_model.get_input_embeddings().weight.shape}")
-    print("✅ PhoBERT embedding transplant with adapter is ready!")
+    print("PhoBERT embedding transplant with adapter is ready!")
 
     # Optional: Freeze the new embedding layer and the main LM
     # for param in blip2_model.blip2.language_model.get_input_embeddings().parameters():
@@ -361,7 +361,7 @@ def get_vivqa_blip2_phobert_with_adapter(
 
     blip2_model.config.image_token_index = image_token_id
 
-    print("✅ PhoBERT embedding transplant with adapter successful!")
+    print("PhoBERT embedding transplant with adapter successful!")
 
     del phobert_tokenizer
     del phobert_model

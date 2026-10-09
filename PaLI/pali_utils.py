@@ -82,7 +82,7 @@ def pali_save_model(
         # Delete previous best-* checkpoint
         best_checkpoints = list(output_dir.glob("checkpoint-best-*"))
         for best_ckpt in best_checkpoints:
-            print(f"🧹 Removing old best checkpoint: {best_ckpt}")
+            print(f"Removing old best checkpoint: {best_ckpt}")
             best_ckpt.unlink()
             
     else:
@@ -108,7 +108,7 @@ def pali_save_model(
 
         # If already have 3 checkpoints, delete oldest one
         if len(checkpoints) >= 3:
-            print(f"🧹 Removing old checkpoint to free space: {oldest_ckpt_path}")
+            print(f"Removing old checkpoint to free space: {oldest_ckpt_path}")
             try:
                 os.remove(oldest_ckpt_path)
             except Exception as e:
@@ -124,7 +124,7 @@ def pali_save_model(
         checkpoint['epoch'] = epoch
 
     torch.save(checkpoint, full_path)
-    print(f"✅ Model saved to {full_path}")
+    print(f"Model saved to {full_path}")
 
 
 def pali_auto_resume(args, model, optimizer=None, device='cuda'):
@@ -193,7 +193,7 @@ def pali_auto_resume(args, model, optimizer=None, device='cuda'):
                 continue
 
     if checkpoint_path is not None and os.path.isfile(checkpoint_path):
-        print(f"✅ Resuming from checkpoint: {checkpoint_path}")
+        print(f"Resuming from checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['model'])
 
@@ -212,6 +212,6 @@ def pali_auto_resume(args, model, optimizer=None, device='cuda'):
         args.start_epoch = start_epoch if isinstance(start_epoch, int) else 0
         return model, optimizer, args.start_epoch
 
-    print("⚠️ No valid checkpoint found to resume.")
+    print("No valid checkpoint found to resume.")
     args.start_epoch = 0
     return model, optimizer, 0

@@ -103,7 +103,7 @@ def verify_files():
                     matches += 1
                 else:
                     mismatches += 1
-                    print(f"\n❌ MISMATCH FOUND on QID: {qid} (line {line_num})")
+                    print(f"\nMISMATCH FOUND on QID: {qid} (line {line_num})")
                     if generated_answer != original_answer_normalized:
                         print(f"  - Answer Mismatch:")
                         print(f"    Original (normalized): '{original_answer_normalized}'")
@@ -122,18 +122,18 @@ def verify_files():
                     matches += 1
                 else:
                     mismatches += 1
-                    print(f"\n❌ MISMATCH FOUND on QID: {qid} (line {line_num})")
+                    print(f"\nMISMATCH FOUND on QID: {qid} (line {line_num})")
                     print(f"  - Reason: Question Mismatch")
                     print(f"    Original: '{original_item['question']}'")
                     print(f"    Decoded:  '{decoded_question}'")
     
     # --- 4. PRINT SUMMARY ---
-    print("\n--- ✅ VERIFICATION COMPLETE ---")
+    print("\n--- VERIFICATION COMPLETE ---")
     print(f"Total Items Checked: {items_checked}")
     print(f"Correct Matches: {matches}")
     print(f"Mismatches: {mismatches}")
     if mismatches == 0:
-        print("\n🎉 Success! All entries in the generated file match the original source.")
+        print("\nSuccess! All entries in the generated file match the original source.")
     else:
         print("\nFound errors. Please review the mismatch details above.")
 

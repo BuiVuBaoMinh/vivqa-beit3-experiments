@@ -62,7 +62,7 @@ def check_dataset(dataset, dataloader, name):
     global max_len_id, over_512_count, total_count
     print(f"\nChecking {name} ({len(dataset)} samples):")
     for batch in tqdm(dataloader, desc=f"Checking {name}", leave=False):
-        # 💡 CORRECTED: Use .shape[1] to get the sequence length
+        # CORRECTED: Use .shape[1] to get the sequence length
         input_len = batch["input_ids"].shape[1]
         
         lengths.append({
@@ -86,14 +86,14 @@ check_dataset(dataset_train, dataloader_train, "train")
 check_dataset(dataset_val, dataloader_val, "val")
 check_dataset(dataset_test, dataloader_test, "test")
 
-print(f"\n📊 Max input_ids length: {max_len_id}")
-print(f"📏 Examples >512 tokens: {over_512_count}/{total_count} ({over_512_count / total_count * 100:.2f}%)")
+print(f"\nMax input_ids length: {max_len_id}")
+print(f"Examples >512 tokens: {over_512_count}/{total_count} ({over_512_count / total_count * 100:.2f}%)")
 
 # Save lengths to file
 output_file = "input_id_lengths.json"
 with open(output_file, "w", encoding="utf-8") as f:
     json.dump(lengths, f, ensure_ascii=False, indent=2)
-print(f"✅ Saved input lengths to: {output_file}")
+print(f"Saved input lengths to: {output_file}")
 
 sys.exit(0)
 

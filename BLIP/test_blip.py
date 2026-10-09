@@ -30,7 +30,7 @@ print("Manually copying pre-trained weights...")
 model.blip.vision_model.load_state_dict(temp_vqa_model.vision_model.state_dict())
 # Note the source is temp_vqa_model.text_encoder and the destination is model.blip.text_model
 model.blip.text_model.load_state_dict(temp_vqa_model.text_encoder.state_dict(), strict=False)
-print("✅ Pre-trained weights for vision and text models loaded successfully.")
+print("Pre-trained weights for vision and text models loaded successfully.")
 
 # Clean up the temporary model to save memory
 del temp_vqa_model
@@ -50,7 +50,7 @@ with torch.no_grad():
 
 # --- VERIFICATION ---
 assert torch.equal(model.blip.text_model.embeddings.word_embeddings.weight, phobert_model.embeddings.word_embeddings.weight)
-print("✅ PhoBERT embedding transplant successful and verified!")
+print("PhoBERT embedding transplant successful and verified!")
 
 # Create Dataset
 from blip_dataset import create_blip_dataset_by_split

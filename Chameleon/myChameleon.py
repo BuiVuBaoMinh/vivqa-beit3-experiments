@@ -170,7 +170,7 @@ def get_vivqa_chameleon(
     print("Manually copying pre-trained weights...")
     model.model.load_state_dict(temp_vqa_model.model.state_dict())
 
-    print("✅ Pre-trained weights for vision and text models loaded successfully.")
+    print("Pre-trained weights for vision and text models loaded successfully.")
 
     # Clean up the temporary model to save memory
     del temp_vqa_model
@@ -239,6 +239,6 @@ def get_vivqa_chameleon_phobert(
     chameleon_model.config.pad_token_id = phobert_tokenizer.pad_token_id
     chameleon_model.model.language_model.config.pad_token_id = phobert_tokenizer.pad_token_id
     
-    print("✅ PhoBERT embedding transplant successful and verified!")
+    print("PhoBERT embedding transplant successful and verified!")
 
     return chameleon_model

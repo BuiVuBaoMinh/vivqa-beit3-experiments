@@ -219,7 +219,7 @@ def get_vivqa_smolvlm(
     model.smolvlm.connector.load_state_dict(temp_vqa_model.model.connector.state_dict())
     model.smolvlm.text_model.load_state_dict(temp_vqa_model.model.text_model.state_dict(), strict=False)
 
-    print("✅ Pre-trained weights for vision and text models loaded successfully.")
+    print("Pre-trained weights for vision and text models loaded successfully.")
 
     print(f"smolvlm.padding_idx: {model.smolvlm.padding_idx}, smolvlm.text_model.padding_idx: {model.smolvlm.text_model.padding_idx}")
 
@@ -333,7 +333,7 @@ def get_vivqa_smolvlm_phobert(
         f"pad_token_id mismatch! smolvlm: {smolvlm_model.smolvlm.padding_idx}, phobert: {phobert_model.config.pad_token_id}"
     assert smolvlm_model.smolvlm.text_model.padding_idx == phobert_model.config.pad_token_id, \
         f"pad_token_id mismatch! smolvlm: {smolvlm_model.smolvlm.text_model.padding_idx}, phobert: {phobert_model.config.pad_token_id}"
-    print("✅ PhoBERT embedding transplant successful and verified!")
+    print("PhoBERT embedding transplant successful and verified!")
 
     return smolvlm_model
 
@@ -422,7 +422,7 @@ def get_vivqa_smolvlm_phobert_with_adapter(
             smolvlm_model.config.text_config.hidden_size
         )
     smolvlm_model.use_phobert_adapter = True
-    print("✅ PhoBERT embedding transplant with adapter is ready!")
+    print("PhoBERT embedding transplant with adapter is ready!")
 
     # =================== END: OLD LOGIC ===================
 
@@ -431,7 +431,7 @@ def get_vivqa_smolvlm_phobert_with_adapter(
     smolvlm_model.config.text_config.vocab_size = new_vocab_size
     smolvlm_model.config.vocab_size = new_vocab_size
 
-    print("✅ PhoBERT embedding transplant with adapter is ready!")
+    print("PhoBERT embedding transplant with adapter is ready!")
 
     # --- Update Special Token IDs in Model Config ---
     print("\nUpdating model configuration with new special token IDs...")
@@ -455,7 +455,7 @@ def get_vivqa_smolvlm_phobert_with_adapter(
         f"pad_token_id mismatch! smolvlm: {smolvlm_model.smolvlm.padding_idx}, phobert: {phobert_model.config.pad_token_id}"
     assert smolvlm_model.smolvlm.text_model.padding_idx == phobert_model.config.pad_token_id, \
         f"pad_token_id mismatch! smolvlm: {smolvlm_model.smolvlm.text_model.padding_idx}, phobert: {phobert_model.config.pad_token_id}"
-    print("✅ PhoBERT embedding transplant successful and verified!")
+    print("PhoBERT embedding transplant successful and verified!")
 
     # Clean up the standalone PhoBERT model to save memory
     del phobert_model

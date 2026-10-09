@@ -28,7 +28,7 @@ for ckpt in glob.glob(os.path.join(output_dir, 'checkpoint-*')):
 
 # If more than 3 checkpoints, delete oldest ones
 if len(checkpoints) > 3:
-    print(f"🧹 Removing old checkpoint to free space: {checkpoint_path}")
+    print(f"Removing old checkpoint to free space: {checkpoint_path}")
     try:
         os.remove(checkpoint_path)
     except Exception as e:

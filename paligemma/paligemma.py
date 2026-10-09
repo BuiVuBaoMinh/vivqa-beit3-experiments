@@ -216,7 +216,7 @@ def get_vivqa_paligemma(
     print("Manually copying pre-trained weights...")
     model.paligemma.vision_tower.load_state_dict(base_paligemma_model.vision_tower.state_dict(), strict=False)
     model.paligemma.language_model.load_state_dict(base_paligemma_model.language_model.state_dict(), strict=False)
-    print("✅ Pre-trained weights for vision and text models loaded successfully.")
+    print("Pre-trained weights for vision and text models loaded successfully.")
 
     # Clean up the temporary model to save memory
     del base_paligemma_model
@@ -299,7 +299,7 @@ def get_vivqa_paligemma_phobert_with_adapter(
     paligemma_model.use_phobert_adapter = True
 
     print(f"Replaced LM embeddings. New embedding shape: {paligemma_model.paligemma.language_model.get_input_embeddings().weight.shape}")
-    print("✅ PhoBERT embedding transplant with adapter is ready!")
+    print("PhoBERT embedding transplant with adapter is ready!")
 
     print("\nUpdating model configuration with new special token IDs...")
     # Update all relevant token IDs
@@ -314,7 +314,7 @@ def get_vivqa_paligemma_phobert_with_adapter(
     paligemma_model.config.image_token_id = image_token_id
     paligemma_model.config._vocab_size = new_vocab_size
 
-    print("✅ PhoBERT embedding transplant with adapter successful!")
+    print("PhoBERT embedding transplant with adapter successful!")
     
     del phobert_model
     del phobert_tokenizer
@@ -420,7 +420,7 @@ def get_vivqa_paligemma_phobert_with_adapter_dev(
     paligemma_model.use_phobert_adapter = True
 
     # print(f"Replaced LM embeddings. New embedding shape: {paligemma_model.paligemma.language_model.get_input_embeddings().weight.shape}")
-    print("✅ PhoBERT embedding transplant with adapter is ready!")
+    print("PhoBERT embedding transplant with adapter is ready!")
 
     print("\nUpdating model configuration with new special token IDs...")
     # Update all relevant token IDs
@@ -434,7 +434,7 @@ def get_vivqa_paligemma_phobert_with_adapter_dev(
     paligemma_model.config.image_token_index = image_token_id # Note: Paligemma uses image_token_index
     paligemma_model.config.image_token_id = image_token_id
 
-    print("✅ PhoBERT embedding transplant with adapter successful!")
+    print("PhoBERT embedding transplant with adapter successful!")
     
     del phobert_model
     del phobert_tokenizer
